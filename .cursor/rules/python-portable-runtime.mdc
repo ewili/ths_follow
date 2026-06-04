@@ -1,0 +1,20 @@
+---
+description: 便携 Python 部署产物与运行时数据不得入 Git（python311、db、logs、VC 安装包）
+alwaysApply: true
+---
+
+# 便携 Python 运行时产物
+
+本仓库为 **signal-server / follow-client** 双端部署，每端含便携 `python311/` 与 Vue `web/`。以下路径**不得提交**（根 `.gitignore` 为准）：
+
+| 路径 | 原因 |
+|------|------|
+| `**/python311/` | 便携 Python + site-packages（体量极大，本地/部署机重建） |
+| `**/*.db` | SQLite 运行时库（含 `data/`、`app/db/`） |
+| `**/logs/*` | 按天轮转日志 |
+| `**/vc_redist.x64.exe` | VC++ 安装包（~24MB，可本地下载） |
+| `**/web/node_modules/`、`**/web/dist/` | 前端依赖与构建产物 |
+
+`data/` 目录可用 `.gitkeep` 占位；`logs/` 由 `settings.py` 自动创建，无需 `.gitkeep`。
+
+新增 ignore 或清理已跟踪路径时，遵循全局 Skill **`gitignore-untrack-path`**。
