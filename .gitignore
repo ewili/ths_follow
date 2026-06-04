@@ -1,0 +1,43 @@
+# ===== 便携 Python 环境（本地搭建，勿提交） =====
+**/python311/
+
+# ===== 运行时数据 =====
+**/*.db
+**/logs/*
+*.log
+
+# ===== 前端构建 =====
+**/web/node_modules/
+**/web/dist/
+
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+
+# ===== 测试 =====
+.pytest_cache/
+.coverage
+htmlcov/
+
+# ===== 二进制依赖（可从微软官网下载） =====
+**/vc_redist.x64.exe
+
+# ===== IDE / OS =====
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ===== Vite 本地配置 =====
+*.local
