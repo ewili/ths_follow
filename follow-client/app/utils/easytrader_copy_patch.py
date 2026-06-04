@@ -11,6 +11,7 @@
 """
 import io
 import logging
+import time as _time_module
 
 import pywinauto.clipboard
 from easytrader.log import logger as et_logger
@@ -502,12 +503,12 @@ _VLM_HALLUCINATION_PATTERNS = frozenset({
 })
 
 
-def _captcha_recognize_vlm(img_path: str, api_key: str) -> tuple[str, list[str]]:
+def _captcha_recognize_vlm(img_path: str, api_key: str, call_count: int = 3) -> tuple[str, list[str]]:
     """使用视觉大模型（DashScope qwen-vl-ocr-latest）识别验证码图片。
 
     通过 httpx 直接请求 DashScope API（不依赖 openai 客户端），
     完全控制 JSON 序列化，避免 PyInstaller 打包后 ASCII 编码错误。
-    多次调用（默认3次）投票选最优，过滤幻觉模式（如 1234/0000）。
+    多次调用投票选最优，过滤幻觉模式（如 1234/0000）。
     返回 (识别结果, 变体列表)，与 _captcha_recognize_multi 签名一致。
     """
     import base64
@@ -528,20 +529,19 @@ def _captcha_recognize_vlm(img_path: str, api_key: str) -> tuple[str, list[str]]
             img_upscaled.save(buf, format="PNG")
             img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
 
-        # 多次调用投票（默认3次）
-        _VLM_CALL_COUNT = 3
-        raw_results = []  # [(result, raw_text), ...]
-        for i in range(_VLM_CALL_COUNT):
+        vlm_call_count = max(1, int(call_count))
+        raw_results = []
+        for i in range(vlm_call_count):
             try:
                 result, raw_text = _vlm_single_call(img_b64, api_key)
-                _log(logging.INFO, "captcha VLM call %d/%d: %s (raw=%s)", i + 1, _VLM_CALL_COUNT, result, raw_text)
+                _log(logging.INFO, "captcha VLM call %d/%d: %s (raw=%s)", i + 1, vlm_call_count, result, raw_text)
                 if len(result) == 4:
                     raw_results.append(result)
             except Exception as e:
-                _log(logging.WARNING, "captcha VLM call %d/%d failed: %s", i + 1, _VLM_CALL_COUNT, e)
+                _log(logging.WARNING, "captcha VLM call %d/%d failed: %s", i + 1, vlm_call_count, e)
 
         if not raw_results:
-            _log(logging.ERROR, "captcha VLM: all %d calls produced no valid result", _VLM_CALL_COUNT)
+            _log(logging.ERROR, "captcha VLM: all %d calls produced no valid result", vlm_call_count)
             return "", []
 
         # 过滤幻觉：已知幻觉模式降权（从投票中移除）
@@ -600,7 +600,7 @@ _captcha_local_fail_count = 0  # auto 模式下 ddddocr 连续失败计数（仅
 
 
 def _captcha_recognize(img_path: str, mode: str = "local", vlm_api_key: str = "",
-                        auto_fail_threshold: int = 3) -> tuple[str, list[str]]:
+                        auto_fail_threshold: int = 3, vlm_call_count: int = 3) -> tuple[str, list[str]]:
     """验证码识别统一入口，根据 mode 分派到不同识别方式。
 
     Args:
@@ -609,6 +609,7 @@ def _captcha_recognize(img_path: str, mode: str = "local", vlm_api_key: str = ""
               'auto' ddddocr 优先，连续失败 auto_fail_threshold 次后降级 VLM
         vlm_api_key: mode='vlm'/'auto' 时的 DashScope API Key
         auto_fail_threshold: auto 模式下 ddddocr 连续失败多少次后切换 VLM（默认 3）
+        vlm_call_count: VLM 模式下每张图调用大模型次数（默认 3）
 
     Returns:
         (识别结果, 变体列表)，与 _captcha_recognize_multi 签名一致
@@ -616,14 +617,14 @@ def _captcha_recognize(img_path: str, mode: str = "local", vlm_api_key: str = ""
     global _captcha_local_fail_count
 
     if mode == "vlm":
-        return _captcha_recognize_vlm(img_path, vlm_api_key)
+        return _captcha_recognize_vlm(img_path, vlm_api_key, call_count=vlm_call_count)
 
     if mode == "auto":
         # 已达失败阈值，直接走 VLM
         if _captcha_local_fail_count >= auto_fail_threshold:
             _log(logging.INFO, "captcha auto: local fail count=%d >= threshold=%d, fallback to VLM",
                  _captcha_local_fail_count, auto_fail_threshold)
-            result, variants = _captcha_recognize_vlm(img_path, vlm_api_key)
+            result, variants = _captcha_recognize_vlm(img_path, vlm_api_key, call_count=vlm_call_count)
             if len(result) == 4:
                 _captcha_local_fail_count = 0  # VLM 成功，重置计数
             return result, variants
@@ -642,7 +643,7 @@ def _captcha_recognize(img_path: str, mode: str = "local", vlm_api_key: str = ""
         # 刚好达到阈值，立即降级尝试 VLM
         if _captcha_local_fail_count >= auto_fail_threshold:
             _log(logging.INFO, "captcha auto: threshold reached, trying VLM immediately")
-            result, variants = _captcha_recognize_vlm(img_path, vlm_api_key)
+            result, variants = _captcha_recognize_vlm(img_path, vlm_api_key, call_count=vlm_call_count)
             if len(result) == 4:
                 _captcha_local_fail_count = 0  # VLM 成功，重置计数
             return result, variants
@@ -690,27 +691,60 @@ def _find_captcha_dialog(trader, timeout: float = 1.0):
         time.sleep(0.2)
 
 
+# ── 验证码通过后冷却（避免紧接的二次复制/置前再次触发弹窗）────────
+_CAPTCHA_COOLDOWN_SECONDS = 4.0
+_captcha_cooldown_until: float = 0.0
+
+
+def mark_captcha_cooldown(seconds: float = _CAPTCHA_COOLDOWN_SECONDS) -> None:
+    global _captcha_cooldown_until
+    _captcha_cooldown_until = _time_module.monotonic() + seconds
+
+
+def is_captcha_cooldown_active() -> bool:
+    return _time_module.monotonic() < _captcha_cooldown_until
+
+
+def should_skip_foreground_captcha() -> bool:
+    """bring_to_foreground 在冷却期内跳过重复验证码处理。"""
+    return is_captcha_cooldown_active()
+
+
+def _read_clipboard_safe() -> str:
+    count = 5
+    while count > 0:
+        try:
+            return pywinauto.clipboard.GetData()
+        except Exception as e:
+            count -= 1
+            logger.exception("%s, retry ......", e)
+    return ""
+
+
 def _copy_get_clipboard_data_patched(self: Copy) -> str:
     """增强版 _get_clipboard_data，修复验证码对话框被压到后面的问题。
 
     关键修复：
     - 用 _find_captcha_dialog() 遍历所有窗口，而非仅 top_window()
-    - 使用 trader.type_edit_control_keys() 写入编辑框（与原始一致）
-    - 不将 _need_captcha_reg 置为 False（原始注释明确禁止）
-    - 验证码处理后（无论成败）始终尝试读取剪贴板
+    - 仅在本轮实际处理并成功验证码后才补复制（^A^C）
+    - 无弹窗时恢复 easytrader 的 _need_captcha_reg = False 免检语义
     """
     trader = self._trader
+    captcha_resolved = False
+    setattr(self, "_captcha_recopy_done", False)
 
     # 读取验证码识别配置
     _captcha_mode = "local"
     _vlm_api_key = ""
     _captcha_auto_fail_threshold = 3
+    _captcha_vlm_call_count = 3
     try:
         from app.db import repository
         _cfg = repository.load_config()
         _captcha_mode = _cfg.captcha_mode
         _vlm_api_key = _cfg.vlm_api_key
         _captcha_auto_fail_threshold = _cfg.captcha_auto_fail_threshold
+        _captcha_vlm_call_count = _cfg.captcha_vlm_call_count
     except Exception:
         pass
 
@@ -718,7 +752,7 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
         # 先快速检查，避免无弹窗时白白等待 1s
         dlg_wrapper = _quick_check_captcha(trader)
         if dlg_wrapper is None:
-            pass  # 无验证码弹窗，跳过
+            Copy._need_captcha_reg = False
         else:
             _log(logging.INFO, "captcha dialog detected")
             found = False
@@ -731,6 +765,9 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
                     if dlg_wrapper is None:
                         logger.info("captcha dialog gone after attempt %d, treating as success", attempt)
                         found = True
+                        captcha_resolved = True
+                        Copy._need_captcha_reg = False
+                        mark_captcha_cooldown()
                         break
 
                 dlg = trader.app.window(handle=dlg_wrapper.handle)
@@ -770,8 +807,14 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
                     _log(logging.ERROR, "captcha capture failed (attempt %d): %s", attempt, e)
                     continue
 
-                captcha_num, variants = _captcha_recognize(_CAPTCHA_IMG_PATH, mode=_captcha_mode, vlm_api_key=_vlm_api_key, auto_fail_threshold=_captcha_auto_fail_threshold)
-                
+                captcha_num, variants = _captcha_recognize(
+                    _CAPTCHA_IMG_PATH,
+                    mode=_captcha_mode,
+                    vlm_api_key=_vlm_api_key,
+                    auto_fail_threshold=_captcha_auto_fail_threshold,
+                    vlm_call_count=_captcha_vlm_call_count,
+                )
+
                 _log(logging.INFO, "captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
 
                 if len(captcha_num) != 4:
@@ -843,6 +886,9 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
                 if _find_captcha_dialog(trader, timeout=0.5) is None:
                     _log(logging.INFO, "验证码验证成功-->%s (variant %d/%d)", captcha_try, attempt+1, len(variants))
                     found = True
+                    captcha_resolved = True
+                    Copy._need_captcha_reg = False
+                    mark_captcha_cooldown()
                     # 验证码处理成功后，稍作等待并尝试清理可能出现的新弹窗（如“连接重连失败”）
                     trader.wait(0.5)
                     try:
@@ -872,58 +918,59 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
                 # 不点取消（避免破坏窗口状态），保持弹窗让用户手动处理
                 _log(logging.ERROR, "captcha %d 次识别均失败，请手动处理验证码弹窗", attempt + 1)
 
-    # 验证码处理完毕后，重新复制 grid 数据到剪贴板
-    # 原因：Copy.get() 中的 Ctrl+A/Ctrl+C 可能被验证码弹窗拦截，
-    # 导致剪贴板仍为旧/空数据。验证码消失后需重新复制才能拿到真实数据。
-    _grid = getattr(self, '_current_grid', None)
-    if _grid is not None:
+    # 仅在本轮验证码处理成功后才补复制（首次 Copy.get 的 ^A^C 可能被弹窗拦截）
+    _grid = getattr(self, "_current_grid", None)
+    if captcha_resolved and _grid is not None:
         try:
             _grid.type_keys("^A^C", set_foreground=False, pause=0.2)
-            trader.wait(0.5)  # 等待 grid 数据加载到剪贴板
+            trader.wait(0.5)
+            setattr(self, "_captcha_recopy_done", True)
             _log(logging.INFO, "clipboard_recopy_after_captcha: grid data re-copied")
         except Exception as e:
             _log(logging.WARNING, "clipboard_recopy_after_captcha failed: %s", e)
+    elif _grid is not None:
+        _log(logging.DEBUG, "clipboard_skip_recopy_no_captcha")
 
-    # 无论验证码处理成功与否，都尝试读取剪贴板（与原始行为一致）
-    count = 5
-    while count > 0:
-        try:
-            return pywinauto.clipboard.GetData()
-        except Exception as e:
-            count -= 1
-            logger.exception("%s, retry ......", e)
-    return ""
+    return _read_clipboard_safe()
 
 
 def _patched_copy_get(self: Copy, control_id: int):
-    """增强版 Copy.get()：保存 grid 引用 + 解析失败时重试。
-
-    原始 Copy.get() 流程：
-      1. _get_grid → 2. _set_foreground → 3. Ctrl+A/Ctrl+C → 4. _get_clipboard_data → 5. _format_grid_data
-    问题：步骤 3 的按键可能被验证码弹窗拦截，步骤 4 处理完验证码后
-    剪贴板仍是旧数据，步骤 5 解析失败返回 None，最终导致 API 返回空列表。
-
-    修复：
-    - 在步骤 3 前保存 grid 引用到 self._current_grid，供 _get_clipboard_data 补丁使用
-    - 若 _format_grid_data 返回 None，重新执行 Ctrl+A/Ctrl+C 并重试
-    """
+    """增强版 Copy.get()：保存 grid 引用 + 冷却期内复用剪贴板 + 解析失败时有限重试。"""
     grid = self._get_grid(control_id)
-    self._current_grid = grid  # 供 _copy_get_clipboard_data_patched 使用
+    self._current_grid = grid
     self._set_foreground(grid)
+
+    if is_captcha_cooldown_active():
+        content = _read_clipboard_safe()
+        if content:
+            result = self._format_grid_data(content)
+            if result is not None:
+                _log(logging.DEBUG, "Copy.get: cooldown reuse clipboard without copy")
+                return result
+
     grid.type_keys("^A^C", set_foreground=False, pause=0.2)
     content = self._get_clipboard_data()
     result = self._format_grid_data(content)
     if result is not None:
         return result
-    # 解析失败（剪贴板数据无效），重新复制并重试
-    _log(logging.WARNING, "Copy.get: _format_grid_data returned None, retrying Ctrl+A/Ctrl+C")
-    try:
-        grid.type_keys("^A^C", set_foreground=False, pause=0.2)
-        self._trader.wait(0.5)
-        content = self._get_clipboard_data()
-        result = self._format_grid_data(content)
-    except Exception as e:
-        _log(logging.ERROR, "Copy.get: retry failed: %s", e)
+
+    content = _read_clipboard_safe()
+    result = self._format_grid_data(content)
+    if result is not None:
+        _log(logging.DEBUG, "Copy.get: format retry from clipboard only")
+        return result
+
+    if not getattr(self, "_captcha_recopy_done", False):
+        _log(logging.WARNING, "Copy.get: _format_grid_data returned None, retrying Ctrl+A/Ctrl+C once")
+        try:
+            grid.type_keys("^A^C", set_foreground=False, pause=0.2)
+            self._trader.wait(0.5)
+            content = self._get_clipboard_data()
+            result = self._format_grid_data(content)
+            if result is not None:
+                return result
+        except Exception as e:
+            _log(logging.ERROR, "Copy.get: retry failed: %s", e)
     return result
 
 
@@ -1007,6 +1054,7 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
     _captcha_mode = _cfg.captcha_mode
     _vlm_api_key = _cfg.vlm_api_key
     _captcha_auto_fail_threshold = _cfg.captcha_auto_fail_threshold
+    _captcha_vlm_call_count = _cfg.captcha_vlm_call_count
 
     for attempt in range(8):
         if attempt > 0:
@@ -1043,7 +1091,13 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
         except Exception as e:
             _log(logging.ERROR, "close_pop_dialog captcha: capture failed (attempt %d): %s", attempt, e)
             continue
-        captcha_num, variants = _captcha_recognize(_CAPTCHA_IMG_PATH, mode=_captcha_mode, vlm_api_key=_vlm_api_key, auto_fail_threshold=_captcha_auto_fail_threshold)
+        captcha_num, variants = _captcha_recognize(
+            _CAPTCHA_IMG_PATH,
+            mode=_captcha_mode,
+            vlm_api_key=_vlm_api_key,
+            auto_fail_threshold=_captcha_auto_fail_threshold,
+            vlm_call_count=_captcha_vlm_call_count,
+        )
         _log(logging.INFO, "close_pop_dialog captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
         if len(captcha_num) != 4:
             try:

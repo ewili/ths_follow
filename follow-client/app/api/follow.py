@@ -5,11 +5,12 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, HTTPException, Query
 
 from app.db import repository
 from app.models.follow import FollowRecordItem, FollowRecordsResponse, FollowStatusResponse
 from app.services.follow_engine import FollowEngine
+from app.services.local_trader_service import LocalTraderService
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/follow", tags=["follow"])
@@ -20,6 +21,8 @@ async def start_follow(
     cold_start_align_existing: bool = Query(False),
 ) -> FollowStatusResponse:
     """启动跟单引擎。运行中再次调用幂等（不重启）。"""
+    if not LocalTraderService.get().is_connected:
+        raise HTTPException(status_code=400, detail="请先连接本地同花顺终端")
     return await FollowEngine.get().start(
         cold_start_align_existing=cold_start_align_existing,
     )

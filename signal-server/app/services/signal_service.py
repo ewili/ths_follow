@@ -90,6 +90,8 @@ _POS_KEY_TODAY_SELL_QTY = "当日卖出"
 
 _ENT_KEY_STOCK_CODE = "证券代码"
 _ENT_KEY_STOCK_NAME = "证券名称"
+# Copy 策略用剪贴板首行作 dict 键；THS 须含「操作」列且值为「买入」/「卖出」。
+# 列缺失或券商异名时 raw 无此键或值为空，见 entrusts_direction_missing 日志中的 sample_keys。
 _ENT_KEY_DIRECTION = "操作"
 _ENT_KEY_PRICE = "委托价格"
 _ENT_KEY_QTY = "委托数量"
@@ -113,6 +115,7 @@ class SignalService:
     def __init__(self) -> None:
         self._cache: dict[CacheKey, _CacheEntry] = {}
         self._inflight: dict[CacheKey, asyncio.Future] = {}
+        self._snapshot_inflight: Optional[asyncio.Future] = None
 
     # ── 单例管理 ──────────────────────────────────────────
 
@@ -142,6 +145,96 @@ class SignalService:
         """返回已过期的缓存条目（供降级使用），无缓存时返回 None。"""
         return self._cache.get(key)
 
+    def _cache_valid(self, key: CacheKey) -> bool:
+        entry = self._cache.get(key)
+        return entry is not None and entry.expires_at > time.monotonic()
+
+    async def _ensure_snapshot_cached(self, *, include_entrusts: bool = True) -> None:
+        """单次 with_lock 拉取资金/持仓/（可选）当日委托，写入 TTL 缓存。
+
+        减少跨页多次 Copy 触发的验证码弹窗。
+        """
+        keys: list[CacheKey] = ["balance", "position"]
+        if include_entrusts:
+            keys = ["entrusts", *keys]
+        if all(self._cache_valid(k) for k in keys):
+            return
+
+        if self._snapshot_inflight is not None:
+            await self._snapshot_inflight
+            return
+
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future = loop.create_future()
+        fut.add_done_callback(lambda done: done.exception())
+        self._snapshot_inflight = fut
+
+        t0 = time.perf_counter()
+        try:
+            for k in keys:
+                if not self._cache_valid(k):
+                    RuntimeMetricsService.get().record_cache_miss(k)
+
+            def _snapshot(trader) -> tuple[Optional[list], Optional[dict], Optional[list]]:
+                entrusts: Optional[list] = None
+                balance: Optional[dict] = None
+                positions: Optional[list] = None
+                if include_entrusts and not self._cache_valid("entrusts"):
+                    entrusts = trader.today_entrusts
+                if not self._cache_valid("balance"):
+                    balance = trader.balance
+                if not self._cache_valid("position"):
+                    positions = trader.position
+                return entrusts, balance, positions
+
+            entrusts, balance, positions = await TraderService.get().with_lock(
+                _snapshot,
+                op_name="today_snapshot" if include_entrusts else "funds_snapshot",
+            )
+
+            now_dt = datetime.now()
+            expires_at = time.monotonic() + TTL_SECONDS
+            if entrusts is not None:
+                self._cache["entrusts"] = _CacheEntry(
+                    value=entrusts,
+                    fetched_at=now_dt,
+                    expires_at=expires_at,
+                )
+            if balance is not None:
+                self._cache["balance"] = _CacheEntry(
+                    value=balance,
+                    fetched_at=now_dt,
+                    expires_at=expires_at,
+                )
+            if positions is not None:
+                self._cache["position"] = _CacheEntry(
+                    value=positions,
+                    fetched_at=now_dt,
+                    expires_at=expires_at,
+                )
+
+            if not fut.done():
+                fut.set_result(None)
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.info(
+                "cache_miss snapshot include_entrusts=%s gui_elapsed_ms=%.0f",
+                include_entrusts,
+                elapsed,
+            )
+        except BaseException as exc:
+            if not fut.done():
+                fut.set_exception(exc)
+            elapsed = (time.perf_counter() - t0) * 1000
+            logger.warning(
+                "cache_miss_failed snapshot include_entrusts=%s gui_elapsed_ms=%.0f detail=%s",
+                include_entrusts,
+                elapsed,
+                exc,
+            )
+            raise
+        finally:
+            self._snapshot_inflight = None
+
     # ── 三层算法核心：快路径 → singleflight → leader ────
 
     async def _get_or_fetch(
@@ -155,6 +248,10 @@ class SignalService:
         阶段 2（singleflight）：发现 inflight Future 时 await 同一个 Future
         阶段 3（leader）：自己创建 Future 发起真实拉取，完成后唤醒所有等待者
         """
+        if key in ("entrusts", "balance", "position"):
+            include_entrusts = key == "entrusts"
+            await self._ensure_snapshot_cached(include_entrusts=include_entrusts)
+
         # 阶段 1：快路径（dict.get 是 asyncio 单线程下的原子操作）
         entry = self._cache.get(key)
         now = time.monotonic()
@@ -271,11 +368,10 @@ class SignalService:
             logger.info("entrusts_skipped_schedule_paused")
             return [], None
 
-        raw_entrusts, raw_balance, raw_positions = await asyncio.gather(
-            self._get_or_fetch("entrusts", self._fetch_entrusts),
-            self._get_or_fetch("balance", self._fetch_balance),
-            self._get_or_fetch("position", self._fetch_position),
-        )
+        await self._ensure_snapshot_cached(include_entrusts=True)
+        raw_entrusts = await self._get_or_fetch("entrusts", self._fetch_entrusts)
+        raw_balance = await self._get_or_fetch("balance", self._fetch_balance)
+        raw_positions = await self._get_or_fetch("position", self._fetch_position)
         raw_entrusts = raw_entrusts or []
         raw_positions = raw_positions or []
 
@@ -302,18 +398,9 @@ class SignalService:
                 len(raw_entrusts),
             )
 
-        items = [
-            _build_entrust_dto(e, limit_map, total_assets, pos_qty_map)
-            for e in raw_entrusts
-        ]
-        valid_items = [it for it in items if _is_valid_signal_entrust(it)]
-        if len(valid_items) != len(items):
-            no_limit = sum(1 for it in items if not it.has_limit_price)
-            non_maimai = sum(1 for it in items if "买卖" not in it.entrust_attr)
-            logger.info(
-                "entrusts_filter total=%d valid=%d filtered_no_limit=%d filtered_non_maimai=%d",
-                len(items), len(valid_items), no_limit, non_maimai,
-            )
+        valid_items = _assemble_valid_entrust_dtos(
+            raw_entrusts, limit_map, total_assets, pos_qty_map
+        )
         return valid_items, trade_date
 
     async def get_history_entrusts_as_dto(
@@ -326,11 +413,9 @@ class SignalService:
         raw_entrusts = await TraderService.get().get_history_entrusts(period)
         raw_entrusts = raw_entrusts or []
 
-        # 并行拉取 balance + position 用于 ratio 计算
-        raw_balance, raw_positions = await asyncio.gather(
-            self._get_or_fetch("balance", self._fetch_balance),
-            self._get_or_fetch("position", self._fetch_position),
-        )
+        await self._ensure_snapshot_cached(include_entrusts=False)
+        raw_balance = await self._get_or_fetch("balance", self._fetch_balance)
+        raw_positions = await self._get_or_fetch("position", self._fetch_position)
         raw_positions = raw_positions or []
 
         total_assets = _to_float(raw_balance.get(_BAL_KEY_TOTAL_ASSETS), 0.0)
@@ -342,12 +427,9 @@ class SignalService:
         codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
         limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
 
-        items = [
-            _build_entrust_dto(e, limit_map, total_assets, pos_qty_map)
-            for e in raw_entrusts
-        ]
-        valid_items = [it for it in items if _is_valid_signal_entrust(it)]
-        return valid_items, trade_date
+        return _assemble_valid_entrust_dtos(
+            raw_entrusts, limit_map, total_assets, pos_qty_map
+        ), trade_date
 
 
 def _is_valid_signal_entrust(dto: SignalEntrustDTO) -> bool:
@@ -357,6 +439,50 @@ def _is_valid_signal_entrust(dto: SignalEntrustDTO) -> bool:
     if "买卖" not in dto.entrust_attr:
         return False
     return True
+
+
+def _assemble_valid_entrust_dtos(
+    raw_entrusts: list[dict],
+    limit_map: dict[str, dict],
+    total_assets: float,
+    pos_qty_map: dict[str, int],
+) -> list[SignalEntrustDTO]:
+    """从 easytrader 原始委托构建 DTO，过滤未知方向与无效信号。"""
+    items: list[SignalEntrustDTO] = []
+    for e in raw_entrusts:
+        dto = _build_entrust_dto(e, limit_map, total_assets, pos_qty_map)
+        if dto is not None:
+            items.append(dto)
+    return _log_and_filter_entrust_items(raw_entrusts, items)
+
+
+def _log_and_filter_entrust_items(
+    raw_entrusts: list[dict],
+    items: list[SignalEntrustDTO],
+) -> list[SignalEntrustDTO]:
+    valid_items = [it for it in items if _is_valid_signal_entrust(it)]
+    filtered_no_direction = len(raw_entrusts) - len(items)
+    if filtered_no_direction > 0 or len(valid_items) != len(items):
+        no_limit = sum(1 for it in items if not it.has_limit_price)
+        non_maimai = sum(1 for it in items if "买卖" not in it.entrust_attr)
+        logger.info(
+            "entrusts_filter raw=%d with_direction=%d valid=%d "
+            "filtered_no_direction=%d filtered_no_limit=%d filtered_non_maimai=%d",
+            len(raw_entrusts),
+            len(items),
+            len(valid_items),
+            filtered_no_direction,
+            no_limit,
+            non_maimai,
+        )
+        if filtered_no_direction > 0 and raw_entrusts:
+            # Copy 剪贴板表头须含「操作」列，否则 direction 为空；便于对照 THS 列名
+            logger.info(
+                "entrusts_direction_missing count=%d sample_keys=%s",
+                filtered_no_direction,
+                sorted(raw_entrusts[0].keys()),
+            )
+    return valid_items
 
 
 # ── 业务组装辅助函数（模块级，纯函数，便于单测） ───────────
@@ -392,11 +518,16 @@ def _build_entrust_dto(
     limit_map: dict[str, dict],
     total_assets: float,
     pos_qty_map: dict[str, int],
-) -> SignalEntrustDTO:
-    """组装单笔委托 DTO：价格替换 + ratio 计算 + 降级标记。"""
+) -> Optional[SignalEntrustDTO]:
+    """组装单笔委托 DTO：价格替换 + ratio 计算。
+
+    「操作」列无法识别为买入/卖出时返回 None（不进入 API）。
+    """
     stock_code = str(raw.get(_ENT_KEY_STOCK_CODE, "")).strip()
     direction_raw = str(raw.get(_ENT_KEY_DIRECTION, ""))
-    direction = _normalize_direction(direction_raw)
+    direction = _parse_direction(direction_raw)
+    if direction is None:
+        return None
     original_price = _to_float(raw.get(_ENT_KEY_PRICE), 0.0)
     entrust_qty = _to_int(raw.get(_ENT_KEY_QTY), 0)
     filled_qty = _to_int(raw.get(_ENT_KEY_FILLED_QTY), 0)
@@ -444,20 +575,14 @@ def _build_entrust_dto(
     )
 
 
-def _normalize_direction(raw_direction: str) -> Literal["买入", "卖出"]:
-    """精确匹配中文方向（不做 startswith/正则）。
-
-    若 easytrader 返回未识别值（如券商自定义），默认按"买入"处理并写 WARN 日志，
-    避免破坏 Literal Schema 校验。
-    """
-    if raw_direction == "买入":
+def _parse_direction(raw_direction: str) -> Optional[Literal["买入", "卖出"]]:
+    """精确匹配 THS「操作」列：仅「买入」「卖出」有效，否则返回 None。"""
+    normalized = raw_direction.strip()
+    if normalized == "买入":
         return "买入"
-    if raw_direction == "卖出":
+    if normalized == "卖出":
         return "卖出"
-    logger.warning(
-        "entrust direction unrecognized: %r, fallback to 买入", raw_direction
-    )
-    return "买入"
+    return None
 
 
 def _compute_cash_ratio(

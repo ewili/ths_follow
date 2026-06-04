@@ -25,11 +25,11 @@ def _ensure_easytrader():
     global easytrader, grid_strategies
     if easytrader is None:
         try:
+            import app.utils.easytrader_copy_patch  # noqa: F401 — 须在 easytrader 前加载补丁
             import easytrader as _easytrader
             from easytrader import grid_strategies as _grid_strategies
             easytrader = _easytrader
             grid_strategies = _grid_strategies
-            import app.utils.easytrader_copy_patch  # noqa: F401 — 应用 Copy 策略验证码补丁
         except ImportError as e:
             raise ImportError(
                 "easytrader 未安装，请运行: pip install easytrader"
@@ -119,8 +119,14 @@ class TraderService:
         # 验证码弹窗预处理：模态弹窗会阻塞 SetForegroundWindow
         captcha_handled = False
         try:
-            from app.utils.easytrader_copy_patch import _quick_check_captcha, _find_captcha_dialog
-            captcha_dlg = _quick_check_captcha(self._trader)
+            from app.utils.easytrader_copy_patch import (
+                _quick_check_captcha,
+                should_skip_foreground_captcha,
+            )
+            if should_skip_foreground_captcha():
+                captcha_dlg = None
+            else:
+                captcha_dlg = _quick_check_captcha(self._trader)
             if captcha_dlg is not None:
                 logger.info("bring_to_foreground: captcha dialog detected, handling first")
                 self._handle_captcha_dialog(captcha_dlg)
@@ -194,17 +200,20 @@ class TraderService:
         每轮重新截图识别（THS 输入错误后可能自动刷新图片），
         最多 8 轮，每轮只输入 1 个最佳结果。
         """
+        from easytrader.grid_strategies import Copy
         from app.utils.easytrader_copy_patch import (
             _find_captcha_dialog,
             _captcha_recognize,
             _CAPTCHA_IMG_PATH,
             _log,
+            mark_captcha_cooldown,
         )
         from app.db import repository
         _cfg = repository.load_config()
         _captcha_mode = _cfg.captcha_mode
         _vlm_api_key = _cfg.vlm_api_key
         _captcha_auto_fail_threshold = _cfg.captcha_auto_fail_threshold
+        _captcha_vlm_call_count = _cfg.captcha_vlm_call_count
         trader = self._trader
         if trader is None:
             return
@@ -215,6 +224,8 @@ class TraderService:
                 dlg_wrapper = _find_captcha_dialog(trader, timeout=1.0)
                 if dlg_wrapper is None:
                     _log(logging.INFO, "captcha dialog gone after attempt %d", attempt)
+                    Copy._need_captcha_reg = False
+                    mark_captcha_cooldown()
                     return
             dlg = trader.app.window(handle=dlg_wrapper.handle)
             try:
@@ -245,7 +256,13 @@ class TraderService:
             except Exception as e:
                 _log(logging.ERROR, "captcha capture failed (attempt %d): %s", attempt, e)
                 continue
-            captcha_num, variants = _captcha_recognize(_CAPTCHA_IMG_PATH, mode=_captcha_mode, vlm_api_key=_vlm_api_key, auto_fail_threshold=_captcha_auto_fail_threshold)
+            captcha_num, variants = _captcha_recognize(
+                _CAPTCHA_IMG_PATH,
+                mode=_captcha_mode,
+                vlm_api_key=_vlm_api_key,
+                auto_fail_threshold=_captcha_auto_fail_threshold,
+                vlm_call_count=_captcha_vlm_call_count,
+            )
 
             _log(logging.INFO, "captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
             if len(captcha_num) != 4:
@@ -309,6 +326,8 @@ class TraderService:
             # 验证：对话框消失即成功
             if _find_captcha_dialog(trader, timeout=0.5) is None:
                 _log(logging.INFO, "验证码验证成功-->%s (variant %d/%d)", captcha_try, attempt+1, len(variants))
+                Copy._need_captcha_reg = False
+                mark_captcha_cooldown()
                 return
             else:
                 _log(logging.WARNING, "captcha still present after input %s (variant %d/%d)", captcha_try, attempt+1, len(variants))

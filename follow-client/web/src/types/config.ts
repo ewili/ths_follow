@@ -18,6 +18,7 @@ export interface FollowConfigDTO {
   captcha_mode: CaptchaMode
   vlm_api_key: string
   captcha_auto_fail_threshold: number
+  captcha_vlm_call_count: number
   schedule_enabled: boolean
   schedule_weekdays: number[]
   schedule_time_ranges: TimeRange[]
@@ -36,6 +37,7 @@ export interface FollowConfigUpdate {
   captcha_mode: CaptchaMode
   vlm_api_key: string
   captcha_auto_fail_threshold: number
+  captcha_vlm_call_count: number
   schedule_enabled: boolean
   schedule_weekdays: number[]
   schedule_time_ranges: TimeRange[]

@@ -13,6 +13,8 @@ CREATE TABLE IF NOT EXISTS follow_config (
     vlm_api_key                TEXT    NOT NULL DEFAULT '',
     captcha_auto_fail_threshold INTEGER NOT NULL DEFAULT 3
                                CHECK (captcha_auto_fail_threshold BETWEEN 1 AND 10),
+    captcha_vlm_call_count     INTEGER NOT NULL DEFAULT 3
+                               CHECK (captcha_vlm_call_count BETWEEN 1 AND 10),
     schedule_enabled           INTEGER NOT NULL DEFAULT 0,
     schedule_weekdays          TEXT    NOT NULL DEFAULT '',
     schedule_time_ranges       TEXT    NOT NULL DEFAULT '',

@@ -168,11 +168,14 @@ class FollowEngine:
         if not signal_entrusts:
             return True
 
-        # 2. 拉取本地数据
+        # 2. 拉取本地数据（单次锁内快照，减少验证码弹窗）
         try:
-            local_positions = await trader.get_positions() or []
-            local_entrusts = await trader.get_today_entrusts() or []
-            local_balance_dict = await trader.get_balance()
+            local_positions, local_entrusts, local_balance_dict = (
+                await trader.get_follow_snapshot()
+            )
+            local_positions = local_positions or []
+            local_entrusts = local_entrusts or []
+            local_balance_dict = local_balance_dict or {}
         except Exception as exc:
             exc_str = str(exc).lower()
             exc_type = type(exc).__name__

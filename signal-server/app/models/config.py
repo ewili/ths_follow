@@ -41,6 +41,7 @@ class SystemConfigDTO(BaseModel):
     captcha_mode: Literal["local", "vlm", "auto"] = "local"
     vlm_api_key: str = ""
     captcha_auto_fail_threshold: int = 3
+    captcha_vlm_call_count: int = 3
     schedule_enabled: bool = False
     schedule_weekdays: list[int] = []
     schedule_time_ranges: list[TimeRange] = []
@@ -57,6 +58,7 @@ class SystemConfigUpdate(BaseModel):
     captcha_mode: Literal["local", "vlm", "auto"] = "local"
     vlm_api_key: str = ""
     captcha_auto_fail_threshold: int = Field(3, ge=1, le=10)
+    captcha_vlm_call_count: int = Field(3, ge=1, le=10)
     schedule_enabled: bool = False
     schedule_weekdays: list[int] = []
     schedule_time_ranges: list[TimeRange] = []

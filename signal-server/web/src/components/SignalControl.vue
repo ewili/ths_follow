@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { ElButton, ElMessage } from 'element-plus'
 import { getSignalStatus, startSignal, stopSignal } from '@/api/signal'
+import { getDashboardStatus } from '@/api/system'
 import { getErrorMessage } from '@/api/http'
 import type { SignalRuntimeStatus } from '@/types/signal'
+import type { ConnectionStatus } from '@/types/config'
 import StatusBadge from './StatusBadge.vue'
 
 const status = ref<SignalRuntimeStatus>({
@@ -13,7 +15,17 @@ const status = ref<SignalRuntimeStatus>({
   schedule_active: true,
 })
 
+const connection = ref<ConnectionStatus>({
+  state: 'disconnected',
+  last_error: null,
+  last_connect_at: null,
+})
+
 const action = ref<'start' | 'stop' | ''>('')
+
+let connectionTimer: number | null = null
+
+const terminalConnected = computed(() => connection.value.state === 'connected')
 
 const label = computed(() => (status.value.state === 'running' ? '运行中' : '已停止'))
 
@@ -35,7 +47,22 @@ async function refresh() {
   }
 }
 
+async function refreshConnection(silent = false) {
+  try {
+    const dashboard = await getDashboardStatus()
+    connection.value = dashboard.connection
+  } catch (err) {
+    if (!silent) {
+      ElMessage.error(getErrorMessage(err))
+    }
+  }
+}
+
 async function onStart() {
+  if (!terminalConnected.value) {
+    ElMessage.warning('请先连接同花顺终端')
+    return
+  }
   action.value = 'start'
   try {
     status.value = await startSignal()
@@ -61,6 +88,12 @@ async function onStop() {
 
 onMounted(() => {
   void refresh()
+  void refreshConnection(true)
+  connectionTimer = window.setInterval(() => void refreshConnection(true), 5000)
+})
+
+onUnmounted(() => {
+  if (connectionTimer !== null) clearInterval(connectionTimer)
 })
 </script>
 
@@ -90,10 +123,17 @@ onMounted(() => {
 
     <div class="hint" :class="status.state">{{ hint }}</div>
 
+    <div
+      v-if="status.state !== 'running' && !terminalConnected"
+      class="hint stopped terminal-hint"
+    >
+      请先连接同花顺终端后再启动喊单。
+    </div>
+
     <div class="actions">
       <ElButton
         type="success"
-        :disabled="status.state === 'running'"
+        :disabled="status.state === 'running' || !terminalConnected"
         :loading="action === 'start'"
         @click="onStart"
       >
@@ -197,6 +237,11 @@ onMounted(() => {
 
 .hint.stopped {
   background: var(--warning-soft);
+}
+
+.terminal-hint {
+  margin-top: 12px;
+  color: #b88230;
 }
 
 .actions {

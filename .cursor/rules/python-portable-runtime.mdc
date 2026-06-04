@@ -17,4 +17,10 @@ alwaysApply: true
 
 `data/` 目录可用 `.gitkeep` 占位；`logs/` 由 `settings.py` 自动创建，无需 `.gitkeep`。
 
+## 本地启动（Agent）
+
+- 首次或无 `web/dist/` 时：在对应 `web/` 下 `npm install` + `npm run build`，然后**重启** uvicorn，根路径才会提供 Vue 界面。
+- 启动/重启服务前：先执行 Skill **`ths-follow-clear-logs-on-start`** 清空 `**/logs/*`。
+- 启动、端口、同花顺 API 连接、联调步骤：遵循项目 Skill **`ths-follow-local-dev`**（不要重复写完整命令序列在本规则内）。
+
 新增 ignore 或清理已跟踪路径时，遵循全局 Skill **`gitignore-untrack-path`**。

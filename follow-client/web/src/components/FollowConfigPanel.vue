@@ -31,6 +31,7 @@ const form = reactive({
   captcha_mode: 'local' as FollowConfigUpdate['captcha_mode'],
   vlm_api_key: '',
   captcha_auto_fail_threshold: 3,
+  captcha_vlm_call_count: 3,
   schedule_enabled: false,
   schedule_weekdays: [1, 2, 3, 4, 5] as number[],
   schedule_time_ranges: [
@@ -87,6 +88,7 @@ watch(
     form.captcha_mode = cfg.captcha_mode
     form.vlm_api_key = cfg.vlm_api_key
     form.captcha_auto_fail_threshold = cfg.captcha_auto_fail_threshold
+    form.captcha_vlm_call_count = cfg.captcha_vlm_call_count
     form.schedule_enabled = cfg.schedule_enabled
     form.schedule_weekdays =
       cfg.schedule_weekdays.length > 0 ? [...cfg.schedule_weekdays] : [1, 2, 3, 4, 5]
@@ -118,6 +120,7 @@ function buildPayload(): FollowConfigUpdate {
     captcha_mode: form.captcha_mode,
     vlm_api_key: form.vlm_api_key,
     captcha_auto_fail_threshold: form.captcha_auto_fail_threshold,
+    captcha_vlm_call_count: form.captcha_vlm_call_count,
     schedule_enabled: form.schedule_enabled,
     schedule_weekdays: form.schedule_enabled ? [...form.schedule_weekdays] : [],
     schedule_time_ranges: form.schedule_enabled
@@ -245,6 +248,20 @@ function removeTimeRange(index: number) {
             <span class="compat-label">连续失败切换阈值</span>
             <ElInputNumber
               v-model="form.captcha_auto_fail_threshold"
+              :min="1"
+              :max="10"
+              :step="1"
+              controls-position="right"
+              style="width: 120px"
+            />
+          </div>
+          <div
+            v-if="form.captcha_mode === 'vlm' || form.captcha_mode === 'auto'"
+            class="compat-item"
+          >
+            <span class="compat-label">VLM 投票次数</span>
+            <ElInputNumber
+              v-model="form.captcha_vlm_call_count"
               :min="1"
               :max="10"
               :step="1"

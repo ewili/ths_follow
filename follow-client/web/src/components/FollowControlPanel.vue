@@ -32,6 +32,7 @@ const coldStartAlign = ref(false)
 
 const isRunning = computed(() => followStatus.value?.running ?? false)
 const traderState = computed(() => traderStatus.value?.state ?? 'disconnected')
+const traderConnected = computed(() => traderState.value === 'connected')
 
 function formatTime(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-'
@@ -54,6 +55,10 @@ async function onDisconnect() {
 }
 
 async function onStart() {
+  if (!traderConnected.value) {
+    ElMessage.warning('请先连接本地同花顺终端')
+    return
+  }
   const ok = await start(coldStartAlign.value)
   if (followError.value) {
     ElMessage.error(followError.value)
@@ -162,6 +167,10 @@ async function onStop() {
 
     <div v-if="followError" class="error-msg">{{ followError }}</div>
 
+    <div v-if="!isRunning && !traderConnected" class="field-warning">
+      请先连接本地同花顺终端后再启动跟单。
+    </div>
+
     <div class="actions">
       <ElButton
         v-if="isRunning"
@@ -177,6 +186,7 @@ async function onStop() {
         type="primary"
         size="large"
         :loading="startLoading"
+        :disabled="!traderConnected"
         @click="onStart"
       >
         启动跟单

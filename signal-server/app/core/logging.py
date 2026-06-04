@@ -7,7 +7,25 @@ from pathlib import Path
 from app.core.settings import LOG_FILE
 
 
+def _patch_handler_flush_for_windows() -> None:
+    """避免 pywinauto 导入时 ActionLogger.flush 在部分环境下 OSError [Errno 22]。"""
+    if getattr(logging.Handler, "_ths_flush_patched", False):
+        return
+    _orig_flush = logging.Handler.flush
+
+    def _safe_flush(self) -> None:
+        try:
+            _orig_flush(self)
+        except OSError as exc:
+            if getattr(exc, "errno", None) != 22:
+                raise
+
+    logging.Handler.flush = _safe_flush  # type: ignore[method-assign]
+    logging.Handler._ths_flush_patched = True
+
+
 def setup_logging(level: int = logging.INFO) -> None:
+    _patch_handler_flush_for_windows()
     root = logging.getLogger()
     root.setLevel(level)
 

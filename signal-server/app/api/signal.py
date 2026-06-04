@@ -22,9 +22,8 @@ from app.services.signal_runtime_service import SignalRuntimeService
 from app.services.signal_service import (
     SignalService,
     _BAL_KEY_TOTAL_ASSETS,
-    _build_entrust_dto,
     _ENT_KEY_STOCK_CODE,
-    _is_valid_signal_entrust,
+    _assemble_valid_entrust_dtos,
     _POS_KEY_POSITION_QTY,
     _POS_KEY_STOCK_CODE,
     _to_float,
@@ -158,8 +157,9 @@ async def get_entrusts() -> SignalEntrustsResponse:
                 raw_entrusts = stale.value or []
                 codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
                 limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
-                items = [_build_entrust_dto(e, limit_map, total_assets, pos_qty_map) for e in raw_entrusts]
-                valid_items = [it for it in items if _is_valid_signal_entrust(it)]
+                valid_items = _assemble_valid_entrust_dtos(
+                    raw_entrusts, limit_map, total_assets, pos_qty_map
+                )
                 return SignalEntrustsResponse(
                     items=valid_items,
                     trade_date=trade_date,
