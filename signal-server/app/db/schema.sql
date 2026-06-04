@@ -16,6 +16,8 @@ CREATE TABLE IF NOT EXISTS system_config (
     schedule_time_ranges       TEXT    NOT NULL DEFAULT '',
     history_entrust_period     TEXT    NOT NULL DEFAULT '当日'
                                CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年')),
+    signal_mode                TEXT    NOT NULL DEFAULT 'ratio'
+                               CHECK (signal_mode IN ('ratio', 'multiplier')),
     updated_at                 TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 

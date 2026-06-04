@@ -46,6 +46,7 @@ class SystemConfigDTO(BaseModel):
     schedule_weekdays: list[int] = []
     schedule_time_ranges: list[TimeRange] = []
     history_entrust_period: Literal["当日", "近一周", "近一月", "近三月", "近一年"] = "当日"
+    signal_mode: Literal["ratio", "multiplier"] = "ratio"
     updated_at: datetime
 
 
@@ -63,6 +64,7 @@ class SystemConfigUpdate(BaseModel):
     schedule_weekdays: list[int] = []
     schedule_time_ranges: list[TimeRange] = []
     history_entrust_period: Literal["当日", "近一周", "近一月", "近三月", "近一年"] = "当日"
+    signal_mode: Literal["ratio", "multiplier"] = "ratio"
 
     @field_validator("ths_exe_path")
     @classmethod

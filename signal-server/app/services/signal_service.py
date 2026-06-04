@@ -150,12 +150,15 @@ class SignalService:
         entry = self._cache.get(key)
         return entry is not None and entry.expires_at > time.monotonic()
 
-    async def _ensure_snapshot_cached(self, *, include_entrusts: bool = True) -> None:
+    async def _ensure_snapshot_cached(self, *, include_entrusts: bool = True, include_funds: bool = True) -> None:
         """单次 with_lock 拉取资金/持仓/（可选）当日委托，写入 TTL 缓存。
 
         减少跨页多次 Copy 触发的验证码弹窗。
+        倍数模式下 include_funds=False 时跳过 balance/position 拉取。
         """
-        keys: list[CacheKey] = ["balance", "position"]
+        keys: list[CacheKey] = []
+        if include_funds:
+            keys = ["balance", "position"]
         if include_entrusts:
             keys = ["entrusts", *keys]
         if all(self._cache_valid(k) for k in keys):
@@ -366,11 +369,40 @@ class SignalService:
 
         返回 (items, trade_date)；trade_date 为涨跌停价对应的交易日，无数据时 None。
         时段控制启用且不在运行时段时，直接返回空列表，避免非交易时段 GUI 调用。
+
+        倍数模式下跳过 balance/position 拉取，cash_ratio/position_ratio 返回 None。
         """
         if self._is_schedule_paused():
             logger.info("entrusts_skipped_schedule_paused")
             return [], None
 
+        # 获取当前模式
+        from app.services.signal_runtime_service import SignalRuntimeService
+        signal_mode = SignalRuntimeService.get().get_mode().signal_mode
+
+        if signal_mode == "multiplier":
+            # 倍数模式：仅拉取 entrusts，不拉 balance/position
+            await self._ensure_snapshot_cached(include_entrusts=True, include_funds=False)
+            raw_entrusts = await self._get_or_fetch("entrusts", self._fetch_entrusts)
+            raw_entrusts = raw_entrusts or []
+
+            codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
+            limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
+
+            # 诊断日志
+            if raw_entrusts:
+                matched_codes = [c for c in codes if c in limit_map]
+                logger.info(
+                    "entrusts_diagnosis mode=multiplier raw_count=%d codes=%d limit_matched=%d trade_date=%s",
+                    len(raw_entrusts), len(codes), len(matched_codes), trade_date,
+                )
+
+            valid_items = _assemble_valid_entrust_dtos(
+                raw_entrusts, limit_map, total_assets=0.0, pos_qty_map={}, signal_mode=signal_mode
+            )
+            return valid_items, trade_date
+
+        # 资金比例模式：原有逻辑不变
         await self._ensure_snapshot_cached(include_entrusts=True)
         raw_entrusts = await self._get_or_fetch("entrusts", self._fetch_entrusts)
         raw_balance = await self._get_or_fetch("balance", self._fetch_balance)
@@ -391,7 +423,7 @@ class SignalService:
         if raw_entrusts:
             matched_codes = [c for c in codes if c in limit_map]
             logger.info(
-                "entrusts_diagnosis raw_count=%d codes=%d limit_matched=%d trade_date=%s",
+                "entrusts_diagnosis mode=ratio raw_count=%d codes=%d limit_matched=%d trade_date=%s",
                 len(raw_entrusts), len(codes), len(matched_codes), trade_date,
             )
         if trade_date is None and raw_entrusts:
@@ -402,7 +434,7 @@ class SignalService:
             )
 
         valid_items = _assemble_valid_entrust_dtos(
-            raw_entrusts, limit_map, total_assets, pos_qty_map
+            raw_entrusts, limit_map, total_assets, pos_qty_map, signal_mode=signal_mode
         )
         return valid_items, trade_date
 
@@ -413,9 +445,21 @@ class SignalService:
 
         供跟单端调用，使历史委托也能复用现有 comparator + order_executor 逻辑。
         """
+        from app.services.signal_runtime_service import SignalRuntimeService
+        signal_mode = SignalRuntimeService.get().get_mode().signal_mode
+
         raw_entrusts = await TraderService.get().get_history_entrusts(period)
         raw_entrusts = raw_entrusts or []
 
+        if signal_mode == "multiplier":
+            # 倍数模式：不拉 balance/position
+            codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
+            limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
+            return _assemble_valid_entrust_dtos(
+                raw_entrusts, limit_map, total_assets=0.0, pos_qty_map={}, signal_mode=signal_mode
+            ), trade_date
+
+        # 资金比例模式：原有逻辑
         await self._ensure_snapshot_cached(include_entrusts=False)
         raw_balance = await self._get_or_fetch("balance", self._fetch_balance)
         raw_positions = await self._get_or_fetch("position", self._fetch_position)
@@ -431,7 +475,7 @@ class SignalService:
         limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
 
         return _assemble_valid_entrust_dtos(
-            raw_entrusts, limit_map, total_assets, pos_qty_map
+            raw_entrusts, limit_map, total_assets, pos_qty_map, signal_mode=signal_mode
         ), trade_date
 
 
@@ -449,11 +493,12 @@ def _assemble_valid_entrust_dtos(
     limit_map: dict[str, dict],
     total_assets: float,
     pos_qty_map: dict[str, int],
+    signal_mode: Literal["ratio", "multiplier"] = "ratio",
 ) -> list[SignalEntrustDTO]:
     """从 easytrader 原始委托构建 DTO，过滤未知方向与无效信号。"""
     items: list[SignalEntrustDTO] = []
     for e in raw_entrusts:
-        dto = _build_entrust_dto(e, limit_map, total_assets, pos_qty_map)
+        dto = _build_entrust_dto(e, limit_map, total_assets, pos_qty_map, signal_mode=signal_mode)
         if dto is not None:
             items.append(dto)
     return _log_and_filter_entrust_items(raw_entrusts, items)
@@ -521,10 +566,12 @@ def _build_entrust_dto(
     limit_map: dict[str, dict],
     total_assets: float,
     pos_qty_map: dict[str, int],
+    signal_mode: Literal["ratio", "multiplier"] = "ratio",
 ) -> Optional[SignalEntrustDTO]:
     """组装单笔委托 DTO：价格替换 + ratio 计算。
 
     「操作」列无法识别为买入/卖出时返回 None（不进入 API）。
+    倍数模式下跳过 cash_ratio/position_ratio 计算，返回 None。
     """
     stock_code = str(raw.get(_ENT_KEY_STOCK_CODE, "")).strip()
     direction_raw = str(raw.get(_ENT_KEY_DIRECTION, ""))
@@ -547,16 +594,18 @@ def _build_entrust_dto(
             limit_price = _to_float(limit_entry.get("limitdown_price"), 0.0)
         has_limit_price = limit_price > 0
 
-    # ratio 计算：已成交用 filled_qty（实际资金部署），未成交用 entrust_qty（意图）
-    # 分母使用"总资产"（现金+市值），代表账户真实规模，保证等比例跟单
-    ratio_qty = filled_qty if filled_qty > 0 else entrust_qty
+    # 倍数模式下跳过 ratio 计算
     cash_ratio: Optional[float] = None
     position_ratio: Optional[float] = None
-    if direction == "买入":
-        cash_ratio = _compute_cash_ratio(original_price, ratio_qty, total_assets)
-    elif direction == "卖出":
-        cash_ratio = _compute_cash_ratio(original_price, ratio_qty, total_assets)
-        position_ratio = _compute_position_ratio(stock_code, ratio_qty, pos_qty_map)
+    if signal_mode == "ratio":
+        # ratio 计算：已成交用 filled_qty（实际资金部署），未成交用 entrust_qty（意图）
+        # 分母使用"总资产"（现金+市值），代表账户真实规模，保证等比例跟单
+        ratio_qty = filled_qty if filled_qty > 0 else entrust_qty
+        if direction == "买入":
+            cash_ratio = _compute_cash_ratio(original_price, ratio_qty, total_assets)
+        elif direction == "卖出":
+            cash_ratio = _compute_cash_ratio(original_price, ratio_qty, total_assets)
+            position_ratio = _compute_position_ratio(stock_code, ratio_qty, pos_qty_map)
 
     return SignalEntrustDTO(
         stock_code=stock_code,

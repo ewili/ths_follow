@@ -2,6 +2,8 @@ export interface FollowStatusResponse {
   running: boolean
   cold_start_align_existing: boolean | null
   start_time: string | null
+  follow_mode: 'ratio' | 'multiplier'
+  follow_multiplier: number
 }
 
 export type TraderConnectionState = 'disconnected' | 'connected' | 'error'

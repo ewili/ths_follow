@@ -22,6 +22,10 @@ CREATE TABLE IF NOT EXISTS follow_config (
                                CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年')),
     entrust_source             TEXT    NOT NULL DEFAULT 'today'
                                CHECK (entrust_source IN ('today', 'history')),
+    follow_mode                TEXT    NOT NULL DEFAULT 'ratio'
+                               CHECK (follow_mode IN ('ratio', 'multiplier')),
+    follow_multiplier          REAL    NOT NULL DEFAULT 1.0
+                               CHECK (follow_multiplier BETWEEN 0.1 AND 100),
     updated_at                 TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -43,6 +47,8 @@ CREATE TABLE IF NOT EXISTS follow_records (
     limit_price           REAL,
     quantity              INTEGER,
     signal_ratio          REAL,
+    follow_mode           TEXT    CHECK (follow_mode IN ('ratio', 'multiplier')),
+    follow_multiplier     REAL,
     status                TEXT    NOT NULL CHECK (status IN ('pending', 'success', 'warn', 'failed')),
     entrust_no            TEXT,
     error_code            TEXT,

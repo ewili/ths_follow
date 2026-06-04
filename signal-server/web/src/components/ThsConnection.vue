@@ -17,7 +17,7 @@ import {
   ElTimePicker,
 } from 'element-plus'
 import { useSystemConfig } from '@/composables/useSystemConfig'
-import type { HistoryEntrustPeriod, SystemConfigUpdate } from '@/types/config'
+import type { HistoryEntrustPeriod, SignalMode, SystemConfigUpdate } from '@/types/config'
 import StatusBadge from './StatusBadge.vue'
 
 const {
@@ -46,6 +46,7 @@ const form = reactive({
     { start: '13:00', end: '15:00' },
   ],
   history_entrust_period: '当日' as HistoryEntrustPeriod,
+  signal_mode: 'ratio' as SignalMode,
 })
 
 const pathError = computed(() => {
@@ -81,6 +82,7 @@ watch(
             { start: '13:00', end: '15:00' },
           ]
     form.history_entrust_period = cfg.history_entrust_period
+    form.signal_mode = cfg.signal_mode
   },
   { immediate: true },
 )
@@ -100,6 +102,7 @@ function buildPayload(): SystemConfigUpdate {
       ? form.schedule_time_ranges.map((r) => ({ ...r }))
       : [],
     history_entrust_period: form.history_entrust_period,
+    signal_mode: form.signal_mode,
   }
 }
 
@@ -304,6 +307,21 @@ function removeTimeRange(index: number) {
           <ElOption label="近三月" value="近三月" />
           <ElOption label="近一年" value="近一年" />
         </ElSelect>
+      </ElFormItem>
+
+      <ElFormItem label="喊单模式">
+        <div class="compat-group">
+          <div class="compat-item">
+            <ElSelect v-model="form.signal_mode" style="width: 160px">
+              <ElOption label="资金比例" value="ratio" />
+              <ElOption label="倍数" value="multiplier" />
+            </ElSelect>
+          </div>
+        </div>
+        <div class="field-help">
+          <p>资金比例模式：委托按总资产占比换算，跟单端需拉取资金数据。</p>
+          <p>倍数模式：仅拉取委托数据，减少 GUI 调用和验证码触发，跟单端按倍数跟单。</p>
+        </div>
       </ElFormItem>
 
       <ElDivider />

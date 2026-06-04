@@ -33,6 +33,7 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("schedule_weekdays", "TEXT NOT NULL DEFAULT ''"),
         ("schedule_time_ranges", "TEXT NOT NULL DEFAULT ''"),
         ("history_entrust_period", "TEXT NOT NULL DEFAULT '当日' CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年'))"),
+        ("signal_mode", "TEXT NOT NULL DEFAULT 'ratio' CHECK (signal_mode IN ('ratio', 'multiplier'))"),
     ]:
         if col not in existing:
             conn.execute(f"ALTER TABLE system_config ADD COLUMN {col} {ddl}")
@@ -65,6 +66,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 schedule_time_ranges TEXT NOT NULL DEFAULT '',
                 history_entrust_period TEXT NOT NULL DEFAULT '当日'
                                 CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年')),
+                signal_mode     TEXT    NOT NULL DEFAULT 'ratio'
+                                CHECK (signal_mode IN ('ratio', 'multiplier')),
                 updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -117,7 +120,8 @@ def load_config() -> SystemConfigDTO:
             schedule_weekdays=json.loads(row["schedule_weekdays"]) if "schedule_weekdays" in row.keys() and row["schedule_weekdays"] else [],
             schedule_time_ranges=json.loads(row["schedule_time_ranges"]) if "schedule_time_ranges" in row.keys() and row["schedule_time_ranges"] else [],
             history_entrust_period=row["history_entrust_period"] if "history_entrust_period" in row.keys() else "当日",
-            updated_at=datetime.fromisoformat(row["updated_at"]),
+            signal_mode=row["signal_mode"] if "signal_mode" in row.keys() else "ratio",
+            updated_at=datetime.fromisoformat(row["updated_at"])
         )
     finally:
         conn.close()
@@ -141,6 +145,7 @@ def save_config(data: SystemConfigUpdate) -> SystemConfigDTO:
                    schedule_weekdays = ?,
                    schedule_time_ranges = ?,
                    history_entrust_period = ?,
+                   signal_mode   = ?,
                    updated_at    = ?
              WHERE id = 1
             """,
@@ -156,6 +161,7 @@ def save_config(data: SystemConfigUpdate) -> SystemConfigDTO:
                 json.dumps(data.schedule_weekdays),
                 json.dumps([r.model_dump() for r in data.schedule_time_ranges]),
                 data.history_entrust_period,
+                data.signal_mode,
                 now,
             ),
         )

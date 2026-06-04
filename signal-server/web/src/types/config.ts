@@ -2,6 +2,7 @@ export type GridStrategy = 'Copy' | 'Xls' | 'WMCopy'
 export type CaptchaMode = 'local' | 'vlm' | 'auto'
 export type HistoryEntrustPeriod = '当日' | '近一周' | '近一月' | '近三月' | '近一年'
 export type ConnectionState = 'disconnected' | 'connected' | 'error'
+export type SignalMode = 'ratio' | 'multiplier'
 
 export interface TimeRange {
   start: string
@@ -20,6 +21,7 @@ export interface SystemConfigDTO {
   schedule_weekdays: number[]
   schedule_time_ranges: TimeRange[]
   history_entrust_period: HistoryEntrustPeriod
+  signal_mode: SignalMode
   updated_at: string
 }
 
@@ -35,6 +37,7 @@ export interface SystemConfigUpdate {
   schedule_weekdays: number[]
   schedule_time_ranges: TimeRange[]
   history_entrust_period: HistoryEntrustPeriod
+  signal_mode: SignalMode
 }
 
 export interface ConnectionStatus {

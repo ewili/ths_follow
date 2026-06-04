@@ -46,6 +46,8 @@ class FollowAction:
     limit_price: Optional[float] = None
     signal_cash_ratio: Optional[float] = None
     signal_position_ratio: Optional[float] = None
+    follow_mode: Literal["ratio", "multiplier"] = "ratio"
+    follow_multiplier: float = 1.0
     local_entrust_no: Optional[str] = None
 
 
@@ -56,6 +58,8 @@ class FollowStatusResponse(BaseModel):
     running: bool
     cold_start_align_existing: Optional[bool] = None
     start_time: Optional[datetime] = None
+    follow_mode: Literal["ratio", "multiplier"] = "ratio"
+    follow_multiplier: float = 1.0
 
 
 # ── 跟单记录 Response ────────────────────────────────────────
@@ -73,6 +77,8 @@ class FollowRecordItem(BaseModel):
     limit_price: Optional[float]
     quantity: Optional[int]
     signal_ratio: Optional[float]
+    follow_mode: Optional[str] = None
+    follow_multiplier: Optional[float] = None
     status: str
     entrust_no: Optional[str]
     error_code: Optional[str]

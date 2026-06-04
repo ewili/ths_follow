@@ -17,6 +17,13 @@ class SignalRuntimeStatus(BaseModel):
     started_at: Optional[datetime] = None
     last_changed_at: Optional[datetime] = None
     schedule_active: bool = True
+    signal_mode: Literal["ratio", "multiplier"] = "ratio"
+
+
+class SignalModeResponse(BaseModel):
+    """喊单模式查询响应。"""
+
+    signal_mode: Literal["ratio", "multiplier"]
 
 
 class DashboardStatusResponse(BaseModel):

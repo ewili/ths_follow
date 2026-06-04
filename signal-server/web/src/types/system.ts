@@ -7,6 +7,7 @@ export interface SignalRuntimeStatus {
   started_at: string | null
   last_changed_at: string | null
   schedule_active: boolean
+  signal_mode: 'ratio' | 'multiplier'
 }
 
 export interface DashboardStatusResponse {

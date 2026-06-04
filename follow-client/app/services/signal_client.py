@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Literal, Optional
 
 import httpx
 
@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _ENTRUSTS_PATH = "/api/signal/entrusts"
 _HISTORY_ENTRUSTS_DTO_PATH = "/api/signal/history-entrusts-dto"
+_MODE_PATH = "/api/signal/mode"
 _TIMEOUT = httpx.Timeout(connect=50.0, read=60.0, write=50.0, pool=50.0)
 
 
@@ -92,3 +93,29 @@ async def fetch_signal_history_entrusts(
         period, len(items), len(valid), trade_date,
     )
     return valid, trade_date
+
+
+async def fetch_signal_mode(
+    signal_server_url: str,
+) -> Literal["ratio", "multiplier"]:
+    """GET /api/signal/mode，返回喊单端当前模式。
+
+    网络异常时抛出 httpx.HTTPError 子类，由 follow_engine 捕获。
+    """
+    url = f"{signal_server_url.rstrip('/')}{_MODE_PATH}"
+    logger.debug("signal_mode fetching url=%s", url)
+    try:
+        async with httpx.AsyncClient(timeout=_TIMEOUT, trust_env=False) as client:
+            resp = await client.get(url)
+            resp.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        logger.warning("signal_mode_http_error url=%s status=%d detail=%s", url, exc.response.status_code, exc)
+        raise
+    except httpx.HTTPError as exc:
+        logger.warning("signal_mode_network_error url=%s type=%s detail=%s", url, type(exc).__name__, exc)
+        raise
+
+    data = resp.json()
+    mode: Literal["ratio", "multiplier"] = data.get("signal_mode", "ratio")
+    logger.debug("signal_mode fetched mode=%s", mode)
+    return mode

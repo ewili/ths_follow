@@ -25,6 +25,49 @@ logger = logging.getLogger(__name__)
 _MIN_LOT = 100
 
 
+def _calc_buy_qty_multiplier(
+    multiplier: float,
+    entrust_qty: int,
+) -> int:
+    """按倍数计算买入股数，向下取整到100整数倍，不足100股按100股。
+
+    Args:
+        multiplier: 跟单倍数
+        entrust_qty: 喊单买入股数
+
+    Returns:
+        应买入股数（至少100股）
+    """
+    raw = math.floor(entrust_qty * multiplier / _MIN_LOT) * _MIN_LOT
+    return max(_MIN_LOT, raw)
+
+
+def _calc_sell_qty_multiplier(
+    multiplier: float,
+    entrust_qty: int,
+    available_qty: int,
+) -> int:
+    """按倍数计算卖出股数，向下取整到100整数倍，不超过可用持仓。
+
+    兜底规则：
+    - 计算结果不足100股但有持仓 → 全部卖出
+    - 计算结果超过可用持仓 → 全部卖出（不留零股）
+
+    Args:
+        multiplier: 跟单倍数
+        entrust_qty: 喊单卖出股数
+        available_qty: 本地可用持仓
+
+    Returns:
+        实际应卖出的股数
+    """
+    raw = math.floor(entrust_qty * multiplier / _MIN_LOT) * _MIN_LOT
+    # 兜底：计算结果不足100股但有持仓 → 全部卖出
+    if raw == 0 and available_qty > 0:
+        return available_qty
+    return min(raw, available_qty)
+
+
 def _calc_buy_qty_ratio(
     cash_ratio: float,
     total_assets: float,
@@ -103,7 +146,12 @@ async def execute_buy(
                       detail="limit_price=null，涨停价未采集，跳过")
         logger.warning("buy skip limit_price_null stock=%s", stock_code)
         return
-    qty = _calc_buy_qty_ratio(action.signal_cash_ratio, total_assets, action.limit_price)
+
+    # 根据模式选择计算方式
+    if action.follow_mode == "multiplier":
+        qty = _calc_buy_qty_multiplier(action.follow_multiplier, action.signal_entrust_qty)
+    else:
+        qty = _calc_buy_qty_ratio(action.signal_cash_ratio, total_assets, action.limit_price)
     price = _floor2(action.limit_price)
 
     # 【先写】写入 pending 记录（防止崩溃后重复下单）
@@ -179,9 +227,15 @@ async def execute_sell(
     price = _ceil2(action.limit_price or action.signal_original_price)
     used_fallback_price = action.limit_price is None
 
-    qty = _calc_sell_qty_by_position_ratio(
-        action.signal_position_ratio, available_qty,
-    )
+    # 根据模式选择计算方式
+    if action.follow_mode == "multiplier":
+        qty = _calc_sell_qty_multiplier(
+            action.follow_multiplier, action.signal_entrust_qty, available_qty,
+        )
+    else:
+        qty = _calc_sell_qty_by_position_ratio(
+            action.signal_position_ratio, available_qty,
+        )
 
     if used_fallback_price:
         logger.warning(
@@ -306,6 +360,8 @@ def _write_record(
             "limit_price": limit_price,
             "quantity": quantity,
             "signal_ratio": signal_ratio,
+            "follow_mode": action.follow_mode,
+            "follow_multiplier": action.follow_multiplier if action.follow_mode == "multiplier" else None,
             "status": status,
             "entrust_no": entrust_no,
             "error_code": error_code,

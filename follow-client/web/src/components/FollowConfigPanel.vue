@@ -17,7 +17,7 @@ import {
 } from 'element-plus'
 import { getErrorMessage } from '@/api/http'
 import { useFollowConfig } from '@/composables/useFollowConfig'
-import type { EntrustSource, FollowConfigUpdate, HistoryEntrustPeriod } from '@/types/config'
+import type { EntrustSource, FollowConfigUpdate, FollowMode, HistoryEntrustPeriod } from '@/types/config'
 
 const { config, saveLoading, probeLoading, lastApiError, saveConfig, testConnectivity } =
   useFollowConfig()
@@ -40,6 +40,8 @@ const form = reactive({
   ],
   history_entrust_period: '当日' as HistoryEntrustPeriod,
   entrust_source: 'today' as EntrustSource,
+  follow_mode: 'ratio' as FollowMode,
+  follow_multiplier: 1.0,
 })
 
 const urlError = computed(() => {
@@ -101,6 +103,8 @@ watch(
           ]
     form.history_entrust_period = cfg.history_entrust_period || '当日'
     form.entrust_source = cfg.entrust_source || 'today'
+    form.follow_mode = cfg.follow_mode || 'ratio'
+    form.follow_multiplier = cfg.follow_multiplier || 1.0
   },
   { immediate: true },
 )
@@ -129,6 +133,8 @@ function buildPayload(): FollowConfigUpdate {
     history_entrust_period:
       form.entrust_source === 'history' ? form.history_entrust_period : '当日',
     entrust_source: form.entrust_source,
+    follow_mode: form.follow_mode,
+    follow_multiplier: form.follow_multiplier,
   }
 }
 
@@ -335,6 +341,38 @@ function removeTimeRange(index: number) {
               </div>
               <ElButton text type="primary" @click="addTimeRange">添加时段</ElButton>
             </div>
+          </template>
+        </div>
+      </ElFormItem>
+
+      <ElFormItem label="跟单模式">
+        <div class="compat-group">
+          <div class="compat-item">
+            <span class="compat-label">模式选择</span>
+            <ElSelect v-model="form.follow_mode" style="width: 160px">
+              <ElOption label="资金比例" value="ratio" />
+              <ElOption label="倍数" value="multiplier" />
+            </ElSelect>
+          </div>
+          <div v-if="form.follow_mode === 'multiplier'" class="compat-item">
+            <span class="compat-label">跟单倍数</span>
+            <ElInputNumber
+              v-model="form.follow_multiplier"
+              :min="0.1"
+              :max="100"
+              :step="0.1"
+              :precision="1"
+              controls-position="right"
+              style="width: 140px"
+            />
+          </div>
+        </div>
+        <div class="field-help">
+          <template v-if="form.follow_mode === 'ratio'">
+            资金比例模式：按喊单委托占账户比例换算跟单股数，需拉取资金数据。
+          </template>
+          <template v-else>
+            倍数模式：按 喊单手数 × 倍数 计算跟单股数，减少 GUI 调用和验证码触发。启动时需与喊单端模式一致。
           </template>
         </div>
       </ElFormItem>

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from app.db import stock_repository
 from app.models.errors import THS_BUSY, THS_NOT_LOGGED_IN, ThsConnectError
@@ -17,7 +17,8 @@ from app.models.signal import (
     SignalEntrustsResponse,
     SignalPositionsResponse,
 )
-from app.models.system_status import SignalRuntimeStatus
+from typing import Literal
+from app.models.system_status import SignalModeResponse, SignalRuntimeStatus
 from app.services.signal_runtime_service import SignalRuntimeService
 from app.services.signal_service import (
     SignalService,
@@ -41,16 +42,24 @@ async def get_signal_status() -> SignalRuntimeStatus:
     return SignalRuntimeService.get().get_status()
 
 
+@router.get("/mode", response_model=SignalModeResponse)
+async def get_signal_mode() -> SignalModeResponse:
+    """返回当前喊单模式（ratio / multiplier）。"""
+    return SignalRuntimeService.get().get_mode()
+
+
 @router.post("/start", response_model=SignalRuntimeStatus)
-async def start_signal() -> SignalRuntimeStatus:
-    """启动喊单（比例模式）。要求终端已连接。"""
+async def start_signal(
+    signal_mode: Literal["ratio", "multiplier"] = Query("ratio", description="喊单模式"),
+) -> SignalRuntimeStatus:
+    """启动喊单。要求终端已连接。"""
     if TraderService.get().trader is None:
         raise ThsConnectError(
             status_code=409,
             code=THS_NOT_LOGGED_IN,
             message="终端未连接，不能启动喊单",
         )
-    return SignalRuntimeService.get().start()
+    return SignalRuntimeService.get().start(signal_mode=signal_mode)
 
 
 @router.post("/stop", response_model=SignalRuntimeStatus)
@@ -148,17 +157,24 @@ async def get_entrusts() -> SignalEntrustsResponse:
                     (datetime.now() - stale.fetched_at).total_seconds(),
                 )
                 # 用过期缓存重新组装 DTO
-                stale_balance = svc.stale_cache_of("balance")
-                stale_position = svc.stale_cache_of("position")
-                raw_balance = stale_balance.value if stale_balance else {}
-                raw_positions = stale_position.value if stale_position else []
-                total_assets = _to_float(raw_balance.get(_BAL_KEY_TOTAL_ASSETS), 0.0)
-                pos_qty_map = {str(p.get(_POS_KEY_STOCK_CODE, "")).strip(): _to_int(p.get(_POS_KEY_POSITION_QTY), 0) for p in raw_positions}
+                from app.services.signal_runtime_service import SignalRuntimeService
+                signal_mode = SignalRuntimeService.get().get_mode().signal_mode
+                if signal_mode == "multiplier":
+                    # 倍数模式：不需要 balance/position
+                    total_assets = 0.0
+                    pos_qty_map = {}
+                else:
+                    stale_balance = svc.stale_cache_of("balance")
+                    stale_position = svc.stale_cache_of("position")
+                    raw_balance = stale_balance.value if stale_balance else {}
+                    raw_positions = stale_position.value if stale_position else []
+                    total_assets = _to_float(raw_balance.get(_BAL_KEY_TOTAL_ASSETS), 0.0)
+                    pos_qty_map = {str(p.get(_POS_KEY_STOCK_CODE, "")).strip(): _to_int(p.get(_POS_KEY_POSITION_QTY), 0) for p in raw_positions}
                 raw_entrusts = stale.value or []
                 codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
                 limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
                 valid_items = _assemble_valid_entrust_dtos(
-                    raw_entrusts, limit_map, total_assets, pos_qty_map
+                    raw_entrusts, limit_map, total_assets, pos_qty_map, signal_mode=signal_mode
                 )
                 return SignalEntrustsResponse(
                     items=valid_items,

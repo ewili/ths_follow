@@ -154,6 +154,16 @@ async function onStop() {
           {{ followStatus.cold_start_align_existing ? '已开启' : '已关闭' }}
         </span>
       </div>
+      <div class="stat-item">
+        <span class="stat-label">跟单模式</span>
+        <span class="stat-value">
+          {{ followStatus.follow_mode === 'multiplier' ? '倍数' : '资金比例' }}
+        </span>
+      </div>
+      <div v-if="followStatus.follow_mode === 'multiplier'" class="stat-item">
+        <span class="stat-label">跟单倍数</span>
+        <span class="stat-value">{{ followStatus.follow_multiplier }}</span>
+      </div>
     </div>
 
     <div v-if="!isRunning" class="start-options">

@@ -13,6 +13,7 @@ const status = ref<DashboardStatusResponse>({
     started_at: null,
     last_changed_at: null,
     schedule_active: true,
+    signal_mode: 'ratio',
   },
   latest_stock_trade_date: null,
   stock_count: 0,

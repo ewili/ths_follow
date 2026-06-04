@@ -61,6 +61,8 @@ class FollowConfigDTO(BaseModel):
     schedule_time_ranges: list[TimeRange] = []
     history_entrust_period: Literal["当日", "近一周", "近一月", "近三月", "近一年"] = "当日"
     entrust_source: Literal["today", "history"] = "today"
+    follow_mode: Literal["ratio", "multiplier"] = "ratio"
+    follow_multiplier: float = 1.0
     updated_at: datetime
 
 
@@ -82,6 +84,8 @@ class FollowConfigUpdate(BaseModel):
     schedule_time_ranges: list[TimeRange] = []
     history_entrust_period: Literal["当日", "近一周", "近一月", "近三月", "近一年"] = "当日"
     entrust_source: Literal["today", "history"] = "today"
+    follow_mode: Literal["ratio", "multiplier"] = "ratio"
+    follow_multiplier: float = Field(1.0, ge=0.1, le=100)
 
     @field_validator("signal_server_url")
     @classmethod

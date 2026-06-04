@@ -61,6 +61,8 @@ def compare_and_decide(
     local_entrusts: list[dict],
     has_followed: Callable[[str, str], bool],
     start_timestamp: Optional[datetime] = None,
+    follow_mode: str = "ratio",
+    follow_multiplier: float = 1.0,
 ) -> list[FollowAction]:
     """生成本轮需要执行的跟单指令列表。
 
@@ -68,6 +70,8 @@ def compare_and_decide(
         has_followed: 函数签名 (signal_entrust_no, action) -> bool，
                       查询 follow_records 判断是否已跟随过。
         start_timestamp: 冷启动时间戳；None 表示全量对齐。
+        follow_mode: 跟单模式（ratio / multiplier）
+        follow_multiplier: 跟单倍数（仅 multiplier 模式使用）
     """
     actions: list[FollowAction] = []
 
@@ -172,6 +176,8 @@ def compare_and_decide(
             signal_entrust_qty=sig.entrust_qty,
             limit_price=sig.limit_price,
             signal_cash_ratio=sig.cash_ratio,
+            follow_mode=follow_mode,
+            follow_multiplier=follow_multiplier,
         ))
 
     # ── 步骤 3：卖出跟随 ──────────────────────────────────────
@@ -213,6 +219,8 @@ def compare_and_decide(
             limit_price=sig.limit_price,
             signal_cash_ratio=sig.cash_ratio,
             signal_position_ratio=sig.position_ratio,
+            follow_mode=follow_mode,
+            follow_multiplier=follow_multiplier,
         ))
 
     return actions

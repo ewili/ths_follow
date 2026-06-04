@@ -20,12 +20,18 @@ router = APIRouter(prefix="/api/follow", tags=["follow"])
 async def start_follow(
     cold_start_align_existing: bool = Query(False),
 ) -> FollowStatusResponse:
-    """启动跟单引擎。运行中再次调用幂等（不重启）。"""
+    """启动跟单引擎。运行中再次调用幂等（不重启）。
+
+    启动时会校验喊单端模式与本地 follow_mode 是否一致。
+    """
     if not LocalTraderService.get().is_connected:
         raise HTTPException(status_code=400, detail="请先连接本地同花顺终端")
-    return await FollowEngine.get().start(
-        cold_start_align_existing=cold_start_align_existing,
-    )
+    try:
+        return await FollowEngine.get().start(
+            cold_start_align_existing=cold_start_align_existing,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @router.post("/stop", response_model=FollowStatusResponse)

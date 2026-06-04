@@ -5,9 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Optional
 
+from typing import Literal, Optional
+
 from app.core.schedule_guard import is_within_schedule
 from app.db import repository
-from app.models.system_status import SignalRuntimeStatus
+from app.models.system_status import SignalModeResponse, SignalRuntimeStatus
 
 
 class SignalRuntimeService:
@@ -19,6 +21,7 @@ class SignalRuntimeService:
         self._state = "stopped"
         self._started_at: Optional[datetime] = None
         self._last_changed_at: Optional[datetime] = None
+        self._signal_mode: Literal["ratio", "multiplier"] = "ratio"
 
     @classmethod
     def get(cls) -> "SignalRuntimeService":
@@ -42,15 +45,24 @@ class SignalRuntimeService:
             started_at=self._started_at,
             last_changed_at=self._last_changed_at,
             schedule_active=schedule_active,
+            signal_mode=self._signal_mode,
         )
 
-    def start(self) -> SignalRuntimeStatus:
+    def start(self, signal_mode: Literal["ratio", "multiplier"] = "ratio") -> SignalRuntimeStatus:
         now = datetime.utcnow()
         if self._state != "running":
             self._state = "running"
+            self._signal_mode = signal_mode
             self._started_at = now
             self._last_changed_at = now
         return self.get_status()
+
+    def get_mode(self) -> SignalModeResponse:
+        """返回当前喊单模式（优先内存态，未运行时从配置读取）。"""
+        if self._state == "running":
+            return SignalModeResponse(signal_mode=self._signal_mode)
+        cfg = repository.load_config()
+        return SignalModeResponse(signal_mode=cfg.signal_mode)
 
     def stop(self) -> SignalRuntimeStatus:
         now = datetime.utcnow()

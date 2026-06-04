@@ -21,7 +21,10 @@ def _get_conn() -> sqlite3.Connection:
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
-    """幂等地迁移：重建 follow_records 表（删除 follow_mode/follow_multiplier 列 + 支持 pending 状态）。"""
+    """幂等地迁移：重建 follow_records 表（保留 follow_mode/follow_multiplier 列 + 支持 pending 状态）。"""
+    import logging
+    _logger = logging.getLogger(__name__)
+
     sql_row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='follow_records'"
     ).fetchone()
@@ -29,8 +32,11 @@ def _migrate(conn: sqlite3.Connection) -> None:
     need_rebuild = False
     if sql_row:
         ddl = sql_row[0]
-        # 旧表含有 follow_mode 列，或不支持 pending 状态，均需重建
-        if "follow_mode" in ddl or "'pending'" not in ddl:
+        # 旧表不支持 pending 状态时需重建
+        if "'pending'" not in ddl:
+            need_rebuild = True
+        # 旧表缺少 follow_mode 列时需重建
+        if "follow_mode" not in ddl:
             need_rebuild = True
 
     if need_rebuild:
@@ -49,6 +55,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
                 limit_price           REAL,
                 quantity              INTEGER,
                 signal_ratio          REAL,
+                follow_mode           TEXT    CHECK (follow_mode IN ('ratio', 'multiplier')),
+                follow_multiplier     REAL,
                 status                TEXT    NOT NULL CHECK (status IN ('pending', 'success', 'warn', 'failed')),
                 entrust_no            TEXT,
                 error_code            TEXT,
@@ -57,15 +65,15 @@ def _migrate(conn: sqlite3.Connection) -> None:
             )
         """)
 
-        # 复制历史数据（旧表列可能有 follow_mode/follow_multiplier，此处不复制）
-        conn.execute("""
+        # 复制历史数据（保留 follow_mode/follow_multiplier 列，如存在）
+        old_cols = [row[1] for row in conn.execute("PRAGMA table_info(follow_records_old)").fetchall()]
+        new_cols = [row[1] for row in conn.execute("PRAGMA table_info(follow_records)").fetchall()]
+        common = [c for c in old_cols if c in new_cols]
+        cols_str = ", ".join(common)
+        conn.execute(f"""
             INSERT INTO follow_records
-                (id, stock_code, stock_name, action, signal_entrust_no, signal_entrust_time,
-                 signal_original_price, signal_entrust_qty, limit_price, quantity,
-                 signal_ratio, status, entrust_no, error_code, detail, created_at)
-            SELECT id, stock_code, stock_name, action, signal_entrust_no, signal_entrust_time,
-                   signal_original_price, signal_entrust_qty, limit_price, quantity,
-                   signal_ratio, status, entrust_no, error_code, detail, created_at
+                ({cols_str})
+            SELECT {cols_str}
             FROM follow_records_old
             WHERE status != 'pending'
         """)
@@ -85,16 +93,14 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
         conn.execute("DROP TABLE follow_records_old")
 
-        import logging
-        logging.getLogger(__name__).info("migrate: follow_records rebuilt (dropped follow_mode/follow_multiplier)")
+        _logger.info("migrate: follow_records rebuilt (with follow_mode/follow_multiplier columns)")
 
     # 清理孤儿的 pending 记录（崩溃遗留）
     deleted = conn.execute(
         "DELETE FROM follow_records WHERE status = 'pending'"
     ).rowcount
     if deleted > 0:
-        import logging
-        logging.getLogger(__name__).info("cleanup_orphan_pending_records count=%d", deleted)
+        _logger.info("cleanup_orphan_pending_records count=%d", deleted)
 
     # follow_config 表列迁移：追加 captcha_mode / vlm_api_key
     import logging as _logging
@@ -110,6 +116,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
         ("schedule_time_ranges", "TEXT NOT NULL DEFAULT ''"),
         ("history_entrust_period", "TEXT NOT NULL DEFAULT '当日' CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年'))"),
         ("entrust_source", "TEXT NOT NULL DEFAULT 'today' CHECK (entrust_source IN ('today', 'history'))"),
+        ("follow_mode", "TEXT NOT NULL DEFAULT 'ratio' CHECK (follow_mode IN ('ratio', 'multiplier'))"),
+        ("follow_multiplier", "REAL NOT NULL DEFAULT 1.0 CHECK (follow_multiplier BETWEEN 0.1 AND 100)"),
     ]:
         if col not in existing_cols:
             conn.execute(f"ALTER TABLE follow_config ADD COLUMN {col} {ddl}")
@@ -148,6 +156,10 @@ def _migrate(conn: sqlite3.Connection) -> None:
                                            CHECK (history_entrust_period IN ('当日', '近一周', '近一月', '近三月', '近一年')),
                 entrust_source             TEXT    NOT NULL DEFAULT 'today'
                                            CHECK (entrust_source IN ('today', 'history')),
+                follow_mode                TEXT    NOT NULL DEFAULT 'ratio'
+                                           CHECK (follow_mode IN ('ratio', 'multiplier')),
+                follow_multiplier          REAL    NOT NULL DEFAULT 1.0
+                                           CHECK (follow_multiplier BETWEEN 0.1 AND 100),
                 updated_at                 TEXT    NOT NULL DEFAULT (datetime('now'))
             )
         """)
@@ -208,6 +220,8 @@ def load_config() -> FollowConfigDTO:
             schedule_time_ranges=json.loads(row["schedule_time_ranges"]) if "schedule_time_ranges" in row.keys() and row["schedule_time_ranges"] else [],
             history_entrust_period=row["history_entrust_period"] if "history_entrust_period" in row.keys() else "当日",
             entrust_source=row["entrust_source"] if "entrust_source" in row.keys() else "today",
+            follow_mode=row["follow_mode"] if "follow_mode" in row.keys() else "ratio",
+            follow_multiplier=row["follow_multiplier"] if "follow_multiplier" in row.keys() else 1.0,
             updated_at=datetime.fromisoformat(row["updated_at"]),
         )
     finally:
@@ -236,6 +250,8 @@ def save_config(data: FollowConfigUpdate) -> FollowConfigDTO:
                    schedule_time_ranges = ?,
                    history_entrust_period = ?,
                    entrust_source = ?,
+                   follow_mode = ?,
+                   follow_multiplier = ?,
                    updated_at = ?
              WHERE id = 1
             """,
@@ -255,6 +271,8 @@ def save_config(data: FollowConfigUpdate) -> FollowConfigDTO:
                 json.dumps([r.model_dump() for r in data.schedule_time_ranges]),
                 data.history_entrust_period,
                 data.entrust_source,
+                data.follow_mode,
+                data.follow_multiplier,
                 now,
             ),
         )
@@ -281,9 +299,10 @@ def insert_follow_record(record: dict) -> int:
                  signal_original_price, signal_entrust_qty,
                  limit_price, quantity,
                  signal_ratio,
+                 follow_mode, follow_multiplier,
                  status, entrust_no, error_code, detail)
             VALUES
-                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 record["stock_code"],
@@ -296,6 +315,8 @@ def insert_follow_record(record: dict) -> int:
                 record.get("limit_price"),
                 record.get("quantity"),
                 record.get("signal_ratio"),
+                record.get("follow_mode"),
+                record.get("follow_multiplier"),
                 record["status"],
                 record.get("entrust_no"),
                 record.get("error_code"),

@@ -31,6 +31,8 @@ class FollowEngine:
         self._start_timestamp: Optional[datetime] = None
         self._consecutive_failures: int = 0
         self._schedule_paused: bool = False
+        self._follow_mode: str = "ratio"
+        self._follow_multiplier: float = 1.0
 
     @classmethod
     def get(cls) -> "FollowEngine":
@@ -51,6 +53,26 @@ class FollowEngine:
         if self._running:
             return self.get_status()
 
+        # 读取本地配置的模式和倍数
+        cfg = repository.load_config()
+        self._follow_mode = cfg.follow_mode
+        self._follow_multiplier = cfg.follow_multiplier
+
+        # 校验喊单端模式一致性
+        try:
+            signal_mode = await signal_client.fetch_signal_mode(cfg.signal_server_url)
+        except Exception as exc:
+            logger.error("mode_check_failed detail=%s", exc, exc_info=True)
+            raise ValueError(f"无法获取喊单端模式，请检查网络连接: {exc}") from exc
+
+        if signal_mode != self._follow_mode:
+            mode_labels = {"ratio": "资金比例", "multiplier": "倍数"}
+            raise ValueError(
+                f"跟单端模式({mode_labels.get(self._follow_mode, self._follow_mode)})"
+                f"与喊单端模式({mode_labels.get(signal_mode, signal_mode)})不匹配，"
+                f"请切换为一致的模式"
+            )
+
         self._cold_start_align_existing = cold_start_align_existing
         self._start_time = datetime.utcnow()
         self._start_timestamp = None if cold_start_align_existing else self._start_time
@@ -58,8 +80,8 @@ class FollowEngine:
         self._task = asyncio.create_task(self._loop(), name="follow_engine_loop")
 
         logger.info(
-            "event=follow_engine_start cold_start_align=%s",
-            cold_start_align_existing,
+            "event=follow_engine_start cold_start_align=%s follow_mode=%s follow_multiplier=%.1f",
+            cold_start_align_existing, self._follow_mode, self._follow_multiplier,
         )
         return self.get_status()
 
@@ -83,6 +105,8 @@ class FollowEngine:
             running=self._running,
             cold_start_align_existing=self._cold_start_align_existing if self._running else None,
             start_time=self._start_time if self._running else None,
+            follow_mode=self._follow_mode if self._running else repository.load_config().follow_mode,
+            follow_multiplier=self._follow_multiplier if self._running else repository.load_config().follow_multiplier,
         )
 
     # ── 轮询核心 ─────────────────────────────────────────────
@@ -145,8 +169,23 @@ class FollowEngine:
             logger.warning("follow_round skip: local trader not connected")
             return False
 
-        # 1. 拉取喊单委托（根据 entrust_source 配置切换数据源）
+        # 0. 模式一致性校验（每轮检查）
         cfg = repository.load_config()
+        try:
+            signal_mode = await signal_client.fetch_signal_mode(signal_url)
+            if signal_mode != self._follow_mode:
+                mode_labels = {"ratio": "资金比例", "multiplier": "倍数"}
+                logger.error(
+                    "mode_mismatch local=%s signal=%s, auto stopping",
+                    self._follow_mode, signal_mode,
+                )
+                await self.stop()
+                return False
+        except Exception as exc:
+            # 网络临时异常，不停止引擎，等下一轮重试
+            logger.warning("mode_check_transient_error detail=%s", exc)
+
+        # 1. 拉取喊单委托（根据 entrust_source 配置切换数据源）
         try:
             if cfg.entrust_source == "history":
                 signal_entrusts, _ = await signal_client.fetch_signal_history_entrusts(
@@ -168,11 +207,18 @@ class FollowEngine:
         if not signal_entrusts:
             return True
 
-        # 2. 拉取本地数据（单次锁内快照，减少验证码弹窗）
+        # 2. 拉取本地数据（倍数模式下不拉 balance）
         try:
-            local_positions, local_entrusts, local_balance_dict = (
-                await trader.get_follow_snapshot()
-            )
+            if self._follow_mode == "multiplier":
+                # 倍数模式：仅拉持仓和委托（卖出需可用持仓），不拉资金
+                local_positions, local_entrusts, _ = (
+                    await trader.get_follow_snapshot()
+                )
+                local_balance_dict = {}
+            else:
+                local_positions, local_entrusts, local_balance_dict = (
+                    await trader.get_follow_snapshot()
+                )
             local_positions = local_positions or []
             local_entrusts = local_entrusts or []
             local_balance_dict = local_balance_dict or {}
@@ -196,6 +242,8 @@ class FollowEngine:
             local_entrusts=local_entrusts,
             has_followed=repository.has_followed,
             start_timestamp=self._start_timestamp,
+            follow_mode=self._follow_mode,
+            follow_multiplier=self._follow_multiplier,
         )
 
         if not actions:
