@@ -306,13 +306,23 @@ class TraderService:
                 pass
             trader.wait(0.1)
             try:
-                # 先清空输入框，防止多轮尝试时字符叠加
+                # 通过 WM_CHAR 逐字符输入，触发 EN_CHANGE 通知
+                # set_edit_text (WM_SETTEXT) 不触发通知，THS 不识别；
+                # type_keys 依赖 SetForegroundWindow，模态弹窗下失败
+                # 清空策略：EM_SETSEL 全选 + WM_CHAR 逐字符覆盖（第一个字符替换选中内容）
+                # 注意：WM_SETTEXT("") 会破坏 THS Edit 控件内部状态，不可使用
                 try:
-                    editor.type_keys("^a{BACKSPACE}", set_foreground=False)
-                    trader.wait(0.1)
+                    hwnd = editor.element_info.handle
                 except Exception:
-                    pass
-                trader.type_edit_control_keys(editor, captcha_try)
+                    hwnd = None
+                if hwnd is not None:
+                    import win32con
+                    import win32gui
+                    win32gui.SendMessage(hwnd, win32con.EM_SETSEL, 0, -1)
+                    for ch in captcha_try:
+                        win32gui.SendMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
+                else:
+                    editor.set_edit_text(captcha_try)
             except Exception as e:
                 _log(logging.ERROR, "captcha type failed (attempt %d): %s", attempt, e)
                 continue
