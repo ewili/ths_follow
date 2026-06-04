@@ -44,6 +44,7 @@ from app.models.signal import (
 )
 from app.services.runtime_metrics_service import RuntimeMetricsService
 from app.services.trader_service import TraderService
+from app.utils.ths_gui_fetch import fetch_funds_stock, fetch_today_entrusts
 
 logger = logging.getLogger(__name__)
 
@@ -179,12 +180,14 @@ class SignalService:
                 entrusts: Optional[list] = None
                 balance: Optional[dict] = None
                 positions: Optional[list] = None
+                need_funds = (
+                    not self._cache_valid("balance")
+                    or not self._cache_valid("position")
+                )
+                if need_funds:
+                    balance, positions = fetch_funds_stock(trader)
                 if include_entrusts and not self._cache_valid("entrusts"):
-                    entrusts = trader.today_entrusts
-                if not self._cache_valid("balance"):
-                    balance = trader.balance
-                if not self._cache_valid("position"):
-                    positions = trader.position
+                    entrusts = fetch_today_entrusts(trader)
                 return entrusts, balance, positions
 
             entrusts, balance, positions = await TraderService.get().with_lock(
@@ -308,23 +311,23 @@ class SignalService:
     # ── 三类原始数据的 fetch（调用 TraderService.with_lock） ─
 
     async def _fetch_balance(self) -> dict:
-        """easytrader.balance @property → 同步访问 → 返回 dict。"""
-        return await TraderService.get().with_lock(
-            lambda t: t.balance,
-            op_name="balance",
-        )
+        balance, _ = await self._fetch_funds_stock_pair()
+        return balance
 
     async def _fetch_position(self) -> list[dict]:
-        """easytrader.position @property → 同步访问 → 返回 list[dict]。"""
+        _, positions = await self._fetch_funds_stock_pair()
+        return positions
+
+    async def _fetch_funds_stock_pair(self) -> tuple[dict, list[dict]]:
+        """单次进入资金股票页，同时拉资金与持仓。"""
         return await TraderService.get().with_lock(
-            lambda t: t.position,
-            op_name="position",
+            lambda t: fetch_funds_stock(t),
+            op_name="funds_snapshot",
         )
 
     async def _fetch_entrusts(self) -> list[dict]:
-        """easytrader.today_entrusts @property → 同步访问 → 返回 list[dict]。"""
         return await TraderService.get().with_lock(
-            lambda t: t.today_entrusts,
+            lambda t: fetch_today_entrusts(t),
             op_name="entrusts",
         )
 

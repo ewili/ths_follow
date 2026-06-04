@@ -105,10 +105,13 @@ class LocalTraderService:
                 _quick_check_captcha,
                 should_skip_foreground_captcha,
             )
-            if should_skip_foreground_captcha():
+            if should_skip_foreground_captcha(self._trader):
                 captcha_dlg = None
             else:
                 captcha_dlg = _quick_check_captcha(self._trader)
+                if captcha_dlg is None:
+                    from app.utils.easytrader_copy_patch import _find_captcha_dialog
+                    captcha_dlg = _find_captcha_dialog(self._trader, timeout=0.5)
             if captcha_dlg is not None:
                 logger.info("bring_to_foreground: captcha dialog detected, handling first")
                 self._handle_captcha_dialog(captcha_dlg)
@@ -347,7 +350,7 @@ class LocalTraderService:
             # 下单类操作需要窗口在前台
             if op_name in (
                 "buy", "sell", "cancel_entrust", "position", "today_entrusts",
-                "balance", "follow_snapshot",
+                "balance", "follow_snapshot", "history_entrusts",
             ):
                 await loop.run_in_executor(None, self._bring_to_foreground)
             result = await loop.run_in_executor(None, fn)
@@ -391,9 +394,10 @@ class LocalTraderService:
             )
 
         def _snapshot() -> tuple[list[dict], list[dict], dict]:
-            balance = self._trader.balance
-            positions = self._trader.position or []
-            entrusts = self._trader.today_entrusts or []
+            from app.utils.ths_gui_fetch import fetch_funds_stock, fetch_today_entrusts
+
+            balance, positions = fetch_funds_stock(self._trader)
+            entrusts = fetch_today_entrusts(self._trader)
             return positions, entrusts, balance
 
         positions, entrusts, balance = await self._run_blocking(
@@ -514,18 +518,9 @@ class LocalTraderService:
         self._require_trader()
 
         def _fetch() -> list[dict]:
-            self._trader._switch_left_menus(["查询[F4]", "历史委托"])
-            try:
-                main_win = self._trader._main
-                btn = main_win.child_window(title=period, class_name="Button")
-                if btn.exists():
-                    btn.click()
-                    self._trader.wait(0.5)
-                else:
-                    logger.warning("历史委托周期按钮 %s 未找到，可能已默认选中", period)
-            except Exception as e:
-                logger.warning("历史委托周期按钮 %s 点击失败: %s", period, e)
-            return self._trader._get_grid_data(self._trader._config.COMMON_GRID_CONTROL_ID)
+            from app.utils.ths_gui_fetch import fetch_history_entrusts
+
+            return fetch_history_entrusts(self._trader, period)
 
         return await self._cached(
             f"history_{period}",

@@ -123,10 +123,13 @@ class TraderService:
                 _quick_check_captcha,
                 should_skip_foreground_captcha,
             )
-            if should_skip_foreground_captcha():
+            if should_skip_foreground_captcha(self._trader):
                 captcha_dlg = None
             else:
                 captcha_dlg = _quick_check_captcha(self._trader)
+                if captcha_dlg is None:
+                    from app.utils.easytrader_copy_patch import _find_captcha_dialog
+                    captcha_dlg = _find_captcha_dialog(self._trader, timeout=0.5)
             if captcha_dlg is not None:
                 logger.info("bring_to_foreground: captcha dialog detected, handling first")
                 self._handle_captcha_dialog(captcha_dlg)
@@ -356,7 +359,18 @@ class TraderService:
         wait_started = _time.perf_counter()
         async with self._lock:
             # GUI 操作前主动将同花顺窗口置前（connect 阶段 trader 尚未赋值，跳过）
-            if op_name in ("balance", "position", "entrusts", "buy", "sell", "cancel_entrust", "health_probe"):
+            if op_name in (
+                "balance",
+                "position",
+                "entrusts",
+                "funds_snapshot",
+                "today_snapshot",
+                "history_entrusts",
+                "buy",
+                "sell",
+                "cancel_entrust",
+                "health_probe",
+            ):
                 await loop.run_in_executor(None, self._bring_to_foreground)
             lock_wait_ms = (_time.perf_counter() - wait_started) * 1000
             t0 = _time.perf_counter()
@@ -508,21 +522,12 @@ class TraderService:
                 message="终端未连接，请先连接同花顺终端",
             )
 
-        def _fetch(trader) -> list[dict]:
-            trader._switch_left_menus(["查询[F4]", "历史委托"])
-            try:
-                main_win = trader._main
-                btn = main_win.child_window(title=period, class_name="Button")
-                if btn.exists():
-                    btn.click()
-                    trader.wait(0.5)
-                else:
-                    logger.warning("历史委托周期按钮 %s 未找到，可能已默认选中", period)
-            except Exception as e:
-                logger.warning("历史委托周期按钮 %s 点击失败: %s", period, e)
-            return trader._get_grid_data(trader._config.COMMON_GRID_CONTROL_ID)
+        from app.utils.ths_gui_fetch import fetch_history_entrusts
 
-        return await self.with_lock(_fetch, op_name="history_entrusts")
+        return await self.with_lock(
+            lambda t: fetch_history_entrusts(t, period),
+            op_name="history_entrusts",
+        )
 
     def _auto_fetch_stock_data(self) -> None:
         """连接成功后自动尝试采集股票行情数据（后台异步，不阻塞连接流程）。

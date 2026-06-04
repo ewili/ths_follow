@@ -705,9 +705,41 @@ def is_captcha_cooldown_active() -> bool:
     return _time_module.monotonic() < _captcha_cooldown_until
 
 
-def should_skip_foreground_captcha() -> bool:
-    """bring_to_foreground 在冷却期内跳过重复验证码处理。"""
-    return is_captcha_cooldown_active()
+def _locate_captcha_dialog(trader, *, need_reg: bool) -> object | None:
+    """查找验证码弹窗：先快检，未命中时再带超时轮询（避免刚弹出时漏检）。"""
+    dlg = _quick_check_captcha(trader)
+    if dlg is not None:
+        return dlg
+    timeout = 1.0 if need_reg else 0.5
+    return _find_captcha_dialog(trader, timeout=timeout)
+
+
+def should_skip_foreground_captcha(trader=None) -> bool:
+    """bring_to_foreground 在冷却期内跳过重复验证码处理。
+
+    若冷却期内验证码弹窗仍可见，不得跳过（否则需等下一次 API 才输入）。
+    """
+    if not is_captcha_cooldown_active():
+        return False
+    if trader is not None and _quick_check_captcha(trader) is not None:
+        return False
+    return True
+
+
+from app.utils.grid_clipboard_context import (
+    get_clipboard_page,
+    get_requested_grid_page,
+    mark_clipboard_page,
+    records_match_grid_page,
+    set_grid_copy_context,
+)
+
+# 向后兼容：外部可从本模块继续 import 页常量
+from app.utils.grid_clipboard_context import (  # noqa: F401
+    GRID_PAGE_FUNDS_STOCK,
+    GRID_PAGE_HISTORY_ENTRUSTS,
+    GRID_PAGE_TODAY_ENTRUSTS,
+)
 
 
 def _read_clipboard_safe() -> str:
@@ -719,6 +751,308 @@ def _read_clipboard_safe() -> str:
             count -= 1
             logger.exception("%s, retry ......", e)
     return ""
+
+
+def _load_captcha_config() -> tuple[str, str, int, int]:
+    mode, key, auto_th, vlm_n = "local", "", 3, 3
+    try:
+        from app.db import repository
+        _cfg = repository.load_config()
+        mode = _cfg.captcha_mode
+        key = _cfg.vlm_api_key
+        auto_th = _cfg.captcha_auto_fail_threshold
+        vlm_n = _cfg.captcha_vlm_call_count
+    except Exception:
+        pass
+    return mode, key, auto_th, vlm_n
+
+
+def _clipboard_matches_requested_page(copy_self: Copy) -> bool:
+    """剪贴板内容能否解析为当前请求的表格页（持仓/委托等）。"""
+    content = _read_clipboard_safe()
+    if not content:
+        return False
+    try:
+        records = copy_self._format_grid_data(content)
+    except Exception:
+        return False
+    if records is None:
+        return False
+    page = get_requested_grid_page()
+    if page:
+        return records_match_grid_page(records, page)
+    return True
+
+
+def _process_captcha_dialog(
+    trader,
+    dlg_wrapper,
+    *,
+    captcha_mode: str,
+    vlm_api_key: str,
+    auto_fail_threshold: int,
+    vlm_call_count: int,
+    log_prefix: str = "",
+) -> bool:
+    """截图识别并输入验证码，对话框消失返回 True。"""
+    prefix = log_prefix or ""
+    found = False
+    attempt = 0
+    for attempt in range(5):
+        if attempt > 0:
+            dlg_wrapper = _find_captcha_dialog(trader, timeout=1.0)
+            if dlg_wrapper is None:
+                logger.info(
+                    "%scaptcha dialog gone after attempt %d, treating as success",
+                    prefix,
+                    attempt,
+                )
+                found = True
+                Copy._need_captcha_reg = False
+                mark_captcha_cooldown()
+                break
+
+        dlg = trader.app.window(handle=dlg_wrapper.handle)
+
+        try:
+            dlg.set_focus()
+        except Exception:
+            pass
+
+        img_ctrl = None
+        try:
+            img_ctrl = dlg.child_window(control_id=0x965, class_name="Static")
+            if not img_ctrl.exists():
+                img_ctrl = None
+        except Exception:
+            img_ctrl = None
+
+        if img_ctrl is None:
+            for child in dlg.children(class_name="Static"):
+                try:
+                    if child.is_visible():
+                        img_ctrl = child
+                        _log(
+                            logging.WARNING,
+                            "%scaptcha image control fallback to first visible Static",
+                            prefix,
+                        )
+                        break
+                except Exception:
+                    continue
+
+        if img_ctrl is None:
+            _log(logging.ERROR, "%scaptcha image control not found (attempt %d)", prefix, attempt)
+            continue
+
+        try:
+            img_ctrl.capture_as_image().save(_CAPTCHA_IMG_PATH)
+        except Exception as e:
+            _log(logging.ERROR, "%scaptcha capture failed (attempt %d): %s", prefix, attempt, e)
+            continue
+
+        captcha_num, variants = _captcha_recognize(
+            _CAPTCHA_IMG_PATH,
+            mode=captcha_mode,
+            vlm_api_key=vlm_api_key,
+            auto_fail_threshold=auto_fail_threshold,
+            vlm_call_count=vlm_call_count,
+        )
+
+        _log(
+            logging.INFO,
+            "%scaptcha result-->%s variants=%s (attempt %d)",
+            prefix,
+            captcha_num,
+            variants,
+            attempt,
+        )
+
+        if len(captcha_num) != 4:
+            try:
+                dlg.child_window(control_id=0x965, class_name="Static").click()
+                trader.wait(0.2)
+            except Exception:
+                pass
+            continue
+
+        captcha_try = variants[0]
+        _log(
+            logging.INFO,
+            "%scaptcha trying best variant (attempt %d): %s",
+            prefix,
+            attempt + 1,
+            captcha_try,
+        )
+
+        editor = None
+        try:
+            editor = dlg.child_window(control_id=0x964, class_name="Edit")
+            if not editor.exists():
+                editor = None
+        except Exception:
+            editor = None
+
+        if editor is None:
+            for child in dlg.children(class_name="Edit"):
+                try:
+                    if child.is_visible():
+                        editor = child
+                        _log(
+                            logging.WARNING,
+                            "%scaptcha edit control fallback to first visible Edit",
+                            prefix,
+                        )
+                        break
+                except Exception:
+                    continue
+
+        if editor is None:
+            _log(logging.ERROR, "%scaptcha edit control not found (attempt %d)", prefix, attempt)
+            break
+
+        try:
+            editor.set_focus()
+        except Exception:
+            pass
+        trader.wait(0.1)
+        try:
+            _type_captcha_via_wm_char(editor, captcha_try)
+        except Exception as e:
+            _log(logging.ERROR, "%scaptcha type failed (attempt %d): %s", prefix, attempt, e)
+            continue
+        trader.wait(0.1)
+
+        try:
+            dlg.child_window(title="确定").click()
+        except Exception:
+            try:
+                dlg.type_keys("{ENTER}", set_foreground=False, pause=0.1)
+            except Exception:
+                pass
+
+        trader.wait(0.5)
+
+        if _find_captcha_dialog(trader, timeout=0.5) is None:
+            _log(
+                logging.INFO,
+                "%s验证码验证成功-->%s (variant %d/%d)",
+                prefix,
+                captcha_try,
+                attempt + 1,
+                len(variants),
+            )
+            found = True
+            Copy._need_captcha_reg = False
+            mark_captcha_cooldown()
+            break
+
+        _log(
+            logging.WARNING,
+            "%scaptcha still present after input %s (variant %d/%d)",
+            prefix,
+            captcha_try,
+            attempt + 1,
+            len(variants),
+        )
+        _log(
+            logging.INFO,
+            "%scaptcha variant %s failed for %s, clicking image to refresh",
+            prefix,
+            captcha_try,
+            captcha_num.upper(),
+        )
+        wait_time = 1.0 + attempt * 0.5
+        trader.wait(wait_time)
+        try:
+            if img_ctrl is not None:
+                img_ctrl.click()
+                trader.wait(0.5)
+            else:
+                dlg.child_window(control_id=0x965, class_name="Static").click()
+                trader.wait(0.5)
+        except Exception:
+            pass
+
+    if not found:
+        _log(
+            logging.ERROR,
+            "%scaptcha %d 次识别均失败，请手动处理验证码弹窗",
+            prefix,
+            attempt + 1,
+        )
+    return found
+
+
+def _recopy_grid_after_captcha(copy_self: Copy, trader) -> None:
+    """验证码通过后补复制：剪贴板已有效则跳过；补复制若再弹验证码则同函数内 OCR。"""
+    _grid = getattr(copy_self, "_current_grid", None)
+    if _grid is None:
+        return
+
+    page = get_requested_grid_page()
+    if _clipboard_matches_requested_page(copy_self):
+        setattr(copy_self, "_captcha_recopy_done", True)
+        mark_clipboard_page(page)
+        _log(
+            logging.INFO,
+            "clipboard_recopy_skip: clipboard already valid page=%s",
+            page,
+        )
+        return
+
+    mode, vlm_key, auto_th, vlm_n = _load_captcha_config()
+    for recopy_round in range(2):
+        try:
+            _grid.type_keys("^A^C", set_foreground=False, pause=0.2)
+            trader.wait(0.5)
+        except Exception as e:
+            _log(logging.WARNING, "clipboard_recopy_after_captcha failed: %s", e)
+            return
+
+        dlg = _locate_captcha_dialog(trader, need_reg=True)
+        if dlg is not None:
+            Copy._need_captcha_reg = True
+            _log(
+                logging.INFO,
+                "captcha dialog detected after recopy (round %d)",
+                recopy_round + 1,
+            )
+            if not _process_captcha_dialog(
+                trader,
+                dlg,
+                captcha_mode=mode,
+                vlm_api_key=vlm_key,
+                auto_fail_threshold=auto_th,
+                vlm_call_count=vlm_n,
+                log_prefix="recopy ",
+            ):
+                return
+            trader.wait(0.5)
+            try:
+                trader.close_pop_dialog()
+            except Exception:
+                pass
+
+        if _clipboard_matches_requested_page(copy_self):
+            setattr(copy_self, "_captcha_recopy_done", True)
+            mark_clipboard_page(page)
+            _log(
+                logging.INFO,
+                "clipboard_recopy_after_captcha: grid data valid page=%s round=%d",
+                page,
+                recopy_round + 1,
+            )
+            return
+
+        _log(
+            logging.WARNING,
+            "clipboard_recopy: clipboard not valid after round %d page=%s",
+            recopy_round + 1,
+            page,
+        )
+
+    _log(logging.WARNING, "clipboard_recopy: gave up after 2 rounds page=%s", page)
 
 
 def _copy_get_clipboard_data_patched(self: Copy) -> str:
@@ -733,202 +1067,34 @@ def _copy_get_clipboard_data_patched(self: Copy) -> str:
     captcha_resolved = False
     setattr(self, "_captcha_recopy_done", False)
 
-    # 读取验证码识别配置
-    _captcha_mode = "local"
-    _vlm_api_key = ""
-    _captcha_auto_fail_threshold = 3
-    _captcha_vlm_call_count = 3
-    try:
-        from app.db import repository
-        _cfg = repository.load_config()
-        _captcha_mode = _cfg.captcha_mode
-        _vlm_api_key = _cfg.vlm_api_key
-        _captcha_auto_fail_threshold = _cfg.captcha_auto_fail_threshold
-        _captcha_vlm_call_count = _cfg.captcha_vlm_call_count
-    except Exception:
-        pass
+    mode, vlm_key, auto_th, vlm_n = _load_captcha_config()
 
-    if Copy._need_captcha_reg:
-        # 先快速检查，避免无弹窗时白白等待 1s
-        dlg_wrapper = _quick_check_captcha(trader)
-        if dlg_wrapper is None:
-            Copy._need_captcha_reg = False
-        else:
-            _log(logging.INFO, "captcha dialog detected")
-            found = False
-            # 每轮截图识别后，在同一轮内循环试所有大小写变体
-            # 全部失败后刷新图片，再进入下一轮
-            for attempt in range(5):
-                # 每次循环重新查找对话框（THS 可能关旧窗开新窗）
-                if attempt > 0:
-                    dlg_wrapper = _find_captcha_dialog(trader, timeout=1.0)
-                    if dlg_wrapper is None:
-                        logger.info("captcha dialog gone after attempt %d, treating as success", attempt)
-                        found = True
-                        captcha_resolved = True
-                        Copy._need_captcha_reg = False
-                        mark_captcha_cooldown()
-                        break
+    dlg_wrapper = _locate_captcha_dialog(trader, need_reg=Copy._need_captcha_reg)
+    if dlg_wrapper is not None:
+        Copy._need_captcha_reg = True
+    elif Copy._need_captcha_reg:
+        Copy._need_captcha_reg = False
 
-                dlg = trader.app.window(handle=dlg_wrapper.handle)
-
-                # 截图并识别验证码
-                try:
-                    dlg.set_focus()
-                except Exception:
-                    pass
-
-                img_ctrl = None
-                try:
-                    img_ctrl = dlg.child_window(control_id=0x965, class_name="Static")
-                    if not img_ctrl.exists():
-                        img_ctrl = None
-                except Exception:
-                    img_ctrl = None
-
-                if img_ctrl is None:
-                    # 回退：取第一个可见 Static 作为图片（防止控件 ID 变更）
-                    for child in dlg.children(class_name="Static"):
-                        try:
-                            if child.is_visible():
-                                img_ctrl = child
-                                _log(logging.WARNING, "captcha image control fallback to first visible Static")
-                                break
-                        except Exception:
-                            continue
-
-                if img_ctrl is None:
-                    _log(logging.ERROR, "captcha image control not found (attempt %d)", attempt)
-                    continue
-
-                try:
-                    img_ctrl.capture_as_image().save(_CAPTCHA_IMG_PATH)
-                except Exception as e:
-                    _log(logging.ERROR, "captcha capture failed (attempt %d): %s", attempt, e)
-                    continue
-
-                captcha_num, variants = _captcha_recognize(
-                    _CAPTCHA_IMG_PATH,
-                    mode=_captcha_mode,
-                    vlm_api_key=_vlm_api_key,
-                    auto_fail_threshold=_captcha_auto_fail_threshold,
-                    vlm_call_count=_captcha_vlm_call_count,
-                )
-
-                _log(logging.INFO, "captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
-
-                if len(captcha_num) != 4:
-                    # 刷新验证码图片重试
-                    try:
-                        dlg.child_window(
-                            control_id=0x965, class_name="Static"
-                        ).click()
-                        trader.wait(0.2)
-                    except Exception:
-                        pass
-                    continue
-
-                # 每轮只试1个变体（避免频繁错误输入导致THS断连）
-                # 由于每轮刷新后都是全新的验证码，应始终尝试当前图片概率最高、最准确的第一个变体 (Variant 1)
-                captcha_try = variants[0]
-                _log(logging.INFO, "captcha trying best variant (attempt %d): %s", attempt+1, captcha_try)
-
-                # 输入验证码
-                editor = None
-                try:
-                    editor = dlg.child_window(control_id=0x964, class_name="Edit")
-                    if not editor.exists():
-                        editor = None
-                except Exception:
-                    editor = None
-
-                if editor is None:
-                    for child in dlg.children(class_name="Edit"):
-                        try:
-                            if child.is_visible():
-                                editor = child
-                                _log(logging.WARNING, "captcha edit control fallback to first visible Edit")
-                                break
-                        except Exception:
-                            continue
-
-                if editor is None:
-                    _log(logging.ERROR, "captcha edit control not found (attempt %d)", attempt)
-                    break
-
-                try:
-                    editor.set_focus()
-                except Exception:
-                    pass
-                trader.wait(0.1)
-                try:
-                    # 通过 WM_CHAR 逐字符输入，触发 EN_CHANGE 通知
-                    # set_edit_text (WM_SETTEXT) 不触发通知，THS 不识别；
-                    # type_keys 依赖 SetForegroundWindow，模态弹窗下失败
-                    _type_captcha_via_wm_char(editor, captcha_try)
-                except Exception as e:
-                    _log(logging.ERROR, "captcha type failed (attempt %d): %s", attempt, e)
-                    continue
-                trader.wait(0.1)
-
-                # 点击确定
-                try:
-                    dlg.child_window(title="确定").click()
-                except Exception:
-                    try:
-                        dlg.type_keys("{ENTER}", set_foreground=False, pause=0.1)
-                    except Exception:
-                        pass
-
-                trader.wait(0.5)
-
-                # 验证：对话框消失即成功
-                if _find_captcha_dialog(trader, timeout=0.5) is None:
-                    _log(logging.INFO, "验证码验证成功-->%s (variant %d/%d)", captcha_try, attempt+1, len(variants))
-                    found = True
-                    captcha_resolved = True
-                    Copy._need_captcha_reg = False
-                    mark_captcha_cooldown()
-                    # 验证码处理成功后，稍作等待并尝试清理可能出现的新弹窗（如“连接重连失败”）
-                    trader.wait(0.5)
-                    try:
-                        trader.close_pop_dialog()
-                    except Exception:
-                        pass
-                    break
-                else:
-                    _log(logging.WARNING, "captcha still present after input %s (variant %d/%d)", captcha_try, attempt+1, len(variants))
-
-                # 本轮变体失败，点击图片刷新验证码
-                _log(logging.INFO, "captcha variant %s failed for %s, clicking image to refresh", captcha_try, captcha_num.upper())
-                # 递增等待：1s, 1.5s, 2s, 2.5s... 避免THS判定恶意操作
-                wait_time = 1.0 + attempt * 0.5
-                trader.wait(wait_time)
-                try:
-                    if img_ctrl is not None:
-                        img_ctrl.click()
-                        trader.wait(0.5)
-                    else:
-                        dlg.child_window(control_id=0x965, class_name="Static").click()
-                        trader.wait(0.5)
-                except Exception:
-                    pass
-
-            if not found:
-                # 不点取消（避免破坏窗口状态），保持弹窗让用户手动处理
-                _log(logging.ERROR, "captcha %d 次识别均失败，请手动处理验证码弹窗", attempt + 1)
-
-    # 仅在本轮验证码处理成功后才补复制（首次 Copy.get 的 ^A^C 可能被弹窗拦截）
-    _grid = getattr(self, "_current_grid", None)
-    if captcha_resolved and _grid is not None:
-        try:
-            _grid.type_keys("^A^C", set_foreground=False, pause=0.2)
+    if dlg_wrapper is not None:
+        _log(logging.INFO, "captcha dialog detected")
+        captcha_resolved = _process_captcha_dialog(
+            trader,
+            dlg_wrapper,
+            captcha_mode=mode,
+            vlm_api_key=vlm_key,
+            auto_fail_threshold=auto_th,
+            vlm_call_count=vlm_n,
+        )
+        if captcha_resolved:
             trader.wait(0.5)
-            setattr(self, "_captcha_recopy_done", True)
-            _log(logging.INFO, "clipboard_recopy_after_captcha: grid data re-copied")
-        except Exception as e:
-            _log(logging.WARNING, "clipboard_recopy_after_captcha failed: %s", e)
-    elif _grid is not None:
+            try:
+                trader.close_pop_dialog()
+            except Exception:
+                pass
+
+    if captcha_resolved:
+        _recopy_grid_after_captcha(self, trader)
+    elif getattr(self, "_current_grid", None) is not None:
         _log(logging.DEBUG, "clipboard_skip_recopy_no_captcha")
 
     return _read_clipboard_safe()
@@ -941,22 +1107,51 @@ def _patched_copy_get(self: Copy, control_id: int):
     self._set_foreground(grid)
 
     if is_captcha_cooldown_active():
-        content = _read_clipboard_safe()
-        if content:
-            result = self._format_grid_data(content)
-            if result is not None:
-                _log(logging.DEBUG, "Copy.get: cooldown reuse clipboard without copy")
-                return result
+        if _locate_captcha_dialog(self._trader, need_reg=False) is not None:
+            _log(
+                logging.INFO,
+                "Copy.get: captcha visible during cooldown, skip clipboard reuse",
+            )
+        else:
+            req_page = get_requested_grid_page()
+            clip_page = get_clipboard_page()
+            if req_page and req_page == clip_page:
+                content = _read_clipboard_safe()
+                if content:
+                    result = self._format_grid_data(content)
+                    if result is not None and records_match_grid_page(result, req_page):
+                        _log(
+                            logging.INFO,
+                            "Copy.get: cooldown reuse clipboard without copy page=%s",
+                            req_page,
+                        )
+                        return result
+                    if result is not None:
+                        _log(
+                            logging.INFO,
+                            "Copy.get: cooldown clipboard shape mismatch page=%s keys=%s, forcing copy",
+                            req_page,
+                            list(result[0].keys())[:12] if result else [],
+                        )
+            elif req_page and req_page != clip_page:
+                _log(
+                    logging.INFO,
+                    "Copy.get: cooldown skip reuse (requested=%s clipboard=%s), forcing copy",
+                    req_page,
+                    clip_page,
+                )
 
     grid.type_keys("^A^C", set_foreground=False, pause=0.2)
     content = self._get_clipboard_data()
     result = self._format_grid_data(content)
     if result is not None:
+        mark_clipboard_page(get_requested_grid_page())
         return result
 
     content = _read_clipboard_safe()
     result = self._format_grid_data(content)
     if result is not None:
+        mark_clipboard_page(get_requested_grid_page())
         _log(logging.DEBUG, "Copy.get: format retry from clipboard only")
         return result
 
@@ -968,6 +1163,7 @@ def _patched_copy_get(self: Copy, control_id: int):
             content = self._get_clipboard_data()
             result = self._format_grid_data(content)
             if result is not None:
+                mark_clipboard_page(get_requested_grid_page())
                 return result
         except Exception as e:
             _log(logging.ERROR, "Copy.get: retry failed: %s", e)
@@ -1188,6 +1384,7 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
         # 验证：对话框消失即成功
         if _find_captcha_dialog(trader, timeout=0.5) is None:
             _log(logging.INFO, "close_pop_dialog 验证码验证成功-->%s (attempt %d)", captcha_try, attempt+1)
+            mark_captcha_cooldown()
             return
         else:
             _log(logging.WARNING, "close_pop_dialog captcha still present after input %s (attempt %d)", captcha_try, attempt+1)
@@ -1216,7 +1413,7 @@ def _patch_close_pop_dialog():
         def _patched_close_pop_dialog(self_trader):
             # 先检查是否存在验证码弹窗
             try:
-                captcha_dlg = _quick_check_captcha(self_trader)
+                captcha_dlg = _locate_captcha_dialog(self_trader, need_reg=False)
                 if captcha_dlg is not None:
                     _log(logging.INFO, "close_pop_dialog: captcha dialog detected, handling via OCR")
                     # 直接处理验证码（而非仅 return 跳过）
