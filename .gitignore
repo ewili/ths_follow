@@ -28,6 +28,7 @@ venv/
 .pytest_cache/
 .coverage
 htmlcov/
+api_test_results.json
 
 # ===== 二进制依赖（可从微软官网下载） =====
 **/vc_redist.x64.exe
@@ -38,6 +39,7 @@ htmlcov/
 *.swp
 .DS_Store
 Thumbs.db
+tmp.png
 
 # ===== Vite 本地配置 =====
 *.local

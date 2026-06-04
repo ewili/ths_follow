@@ -291,6 +291,8 @@ class LocalTraderService:
                 # 通过 WM_CHAR 逐字符输入，触发 EN_CHANGE 通知
                 # set_edit_text (WM_SETTEXT) 不触发通知，THS 不识别；
                 # type_keys 依赖 SetForegroundWindow，模态弹窗下失败
+                # 清空策略：EM_SETSEL 全选 + WM_CHAR 逐字符覆盖（第一个字符替换选中内容）
+                # 注意：WM_SETTEXT("") 会破坏 THS Edit 控件内部状态，不可使用
                 try:
                     hwnd = editor.element_info.handle
                 except Exception:
@@ -299,7 +301,6 @@ class LocalTraderService:
                     import win32con
                     import win32gui
                     win32gui.SendMessage(hwnd, win32con.EM_SETSEL, 0, -1)
-                    win32gui.SendMessage(hwnd, win32con.WM_CLEAR, 0, 0)
                     for ch in captcha_try:
                         win32gui.SendMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
                 else:

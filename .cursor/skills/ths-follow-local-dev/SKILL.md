@@ -117,3 +117,13 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8100/api/trader/connect" -Method POST -
 ## Windows PowerShell
 
 本机默认 shell 可能不支持 `&&`；链式命令用 `;` 或分行执行。见全局规则 **`agent-workflow`**。
+
+### cmd 下调用 PowerShell 的陷阱
+
+默认 shell 为 `cmd.exe` 时，`powershell -Command "..."` 内联命令频繁出问题：
+
+- `$env:PYTHONPATH`、`$body` 等 `$` 变量可能被 cmd 吞掉或误解析
+- `| ConvertTo-Json` 等管道元素在分号 `;` 后可能报「不允许使用空管道元素」
+- `ConvertTo-Json` 对中文输出编码不正确，终端显示乱码
+
+**解决**：将多行脚本写入 `.ps1` 文件，用 `powershell -ExecutionPolicy Bypass -File "xxx.ps1"` 执行。调用 API 测试时优先用 Python 脚本（`urllib.request` + `json`），可正确处理 UTF-8 中文。

@@ -28,6 +28,12 @@ def _type_captcha_via_wm_char(editor, text):
     导致同花顺客户端不识别输入内容；
     type_keys 依赖 SetForegroundWindow，在模态弹窗下失败。
     WM_CHAR 模拟真实键盘输入，触发完整通知链，且不依赖焦点。
+
+    清空策略：先 EM_SETSEL 全选，再逐字符 WM_CHAR 输入覆盖。
+    Edit 控件在存在选中文本时，WM_CHAR 会自动替换选中内容，
+    因此第一个 WM_CHAR 字符会替换全部旧文本，无需显式删除。
+    注意：WM_SETTEXT("") 会破坏 THS Edit 控件的内部状态，
+    导致后续 WM_CHAR 被吞掉，不可使用。
     """
     try:
         hwnd = editor.element_info.handle
@@ -39,13 +45,23 @@ def _type_captcha_via_wm_char(editor, text):
         return
     import win32con
     import win32gui
-    # 选中全部文字
+    # 全选输入框内容（后续 WM_CHAR 会自动替换选中内容）
     win32gui.SendMessage(hwnd, win32con.EM_SETSEL, 0, -1)
-    # 删除选中内容（清空输入框）
-    win32gui.SendMessage(hwnd, win32con.WM_CLEAR, 0, 0)
-    # 逐字符发送 WM_CHAR
+    # 逐字符发送 WM_CHAR（第一个字符会替换所有选中内容）
     for ch in text:
         win32gui.SendMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
+    # 诊断：验证输入框实际内容
+    # 注意：GetWindowText 可能无法读取 THS 自定义 Edit 控件的文本，
+    # mismatch 不代表输入失败，仅供调试参考
+    try:
+        actual = win32gui.GetWindowText(hwnd)
+        if actual != text:
+            logger.debug(
+                "captcha_input_mismatch expected=%s actual=%s hwnd=%s",
+                text, actual, hwnd,
+            )
+    except Exception:
+        pass
 
 # ddddocr 单例（延迟初始化）
 _ddddocr_instance = None      # beta 模型
@@ -1185,11 +1201,15 @@ def _patch_copy_strategy():
 _patch_copy_strategy()
 
 
-# ── pywinauto process_get_modules 补丁 ──────────────────────────────────────
+# ── pywinauto process_get_modules / process_module 补丁 ──────────────────────
 # pywinauto 0.6.6 的 process_get_modules() except 子句未覆盖 OSError，
 # 导致 GetModuleFileNameEx 对受保护系统进程抛出 OSError: [Errno 22] 时
-# 异常透传至 Application.connect()，最终表现为终端连接失败。
-# 补丁：将 OSError 加入 except，保持其余逻辑不变。
+# 异常透传至 Application.connect() / process_from_module()，最终表现为终端连接失败。
+#
+# 补丁策略（双重保险）：
+# 1. process_module() 本身：将 OSError 加入 except，从源头吞掉
+# 2. process_get_modules()：同步加入 OSError 到 except 子句
+# 这样无论 pywinauto 内部通过哪条路径调用 process_module，都不会再抛出 OSError。
 
 def _patch_pywinauto_process_get_modules():
     try:
@@ -1198,22 +1218,40 @@ def _patch_pywinauto_process_get_modules():
         from pywinauto import application as _pwa_app
         from pywinauto.application import ProcessNotFoundError, process_module
 
+        # ── 补丁 1：process_module 从源头吞掉 OSError ──
+        _orig_process_module = process_module
+
+        def _patched_process_module(process_id):
+            try:
+                return _orig_process_module(process_id)
+            except OSError:
+                raise ProcessNotFoundError(
+                    f"Process {process_id} module query failed (OSError)"
+                )
+
+        if not getattr(_pwa_app.process_module, '_patched_oserror', False):
+            _pwa_app.process_module = _patched_process_module
+            _pwa_app.process_module._patched_oserror = True
+            # 同步替换当前模块的引用
+            process_module = _patched_process_module
+            logger.info("已应用 pywinauto process_module OSError 补丁")
+
+        # ── 补丁 2：process_get_modules 也加入 OSError 到 except ──
         def _patched_process_get_modules():
             modules = []
             pids = win32process.EnumProcesses()
             for pid in pids:
                 if pid != 0 and isinstance(pid, int):
                     try:
-                        modules.append((pid, process_module(pid), None))
+                        modules.append((pid, _pwa_app.process_module(pid), None))
                     except (win32gui.error, ProcessNotFoundError, OSError):
                         continue
             return modules
 
-        if getattr(_pwa_app.process_get_modules, '_patched_oserror', False):
-            return
-        _pwa_app.process_get_modules = _patched_process_get_modules
-        _pwa_app.process_get_modules._patched_oserror = True
-        logger.info("已应用 pywinauto process_get_modules OSError 补丁")
+        if not getattr(_pwa_app.process_get_modules, '_patched_oserror', False):
+            _pwa_app.process_get_modules = _patched_process_get_modules
+            _pwa_app.process_get_modules._patched_oserror = True
+            logger.info("已应用 pywinauto process_get_modules OSError 补丁")
     except Exception as _e:
         import logging
         logging.getLogger(__name__).warning("pywinauto OSError 补丁应用失败: %s", _e)
@@ -1495,11 +1533,8 @@ def _type_edit_via_wm_char(editor, text):
         return
     import win32con
     import win32gui
-    # 选中全部文字
+    # 全选后 WM_CHAR 逐字符输入覆盖（第一个字符替换全部选中内容）
     win32gui.SendMessage(hwnd, win32con.EM_SETSEL, 0, -1)
-    # 删除选中内容（清空输入框）
-    win32gui.SendMessage(hwnd, win32con.WM_CLEAR, 0, 0)
-    # 逐字符发送 WM_CHAR
     for ch in text:
         win32gui.SendMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
 

@@ -1,5 +1,5 @@
 ---
-description: 便携 Python 部署产物与运行时数据不得入 Git（python311、db、logs、VC 安装包）
+description: 便携 Python 部署产物与运行时数据不得入 Git（python311、db、logs、VC 安装包）；pywinauto/THS 交互陷阱
 alwaysApply: true
 ---
 
@@ -24,3 +24,28 @@ alwaysApply: true
 - 启动、端口、同花顺 API 连接、联调步骤：遵循项目 Skill **`ths-follow-local-dev`**（不要重复写完整命令序列在本规则内）。
 
 新增 ignore 或清理已跟踪路径时，遵循全局 Skill **`gitignore-untrack-path`**。
+
+## API 路径速查
+
+| 端 | 前缀 | 持仓 | 委托 | 资金 |
+|----|------|------|------|------|
+| 喊单 | `/api/signal` | `/positions` | `/entrusts` | `/balance` |
+| 跟单 | `/api/trader` | `/positions` | `/entrusts` | `/balance` |
+
+注意：跟单端前缀是 **`/api/trader`** 而非 `/api/follow`；持仓和委托路径是**复数**（`/positions`、`/entrusts`）。
+
+## pywinauto / THS 交互陷阱
+
+修改 `easytrader_copy_patch.py` 或 `errors.py` 时，遵循以下约束，同时**双端同步**（见 Skill **`ths-pywinauto-patch-sync`**）：
+
+### OSError [Errno 22] 不是断连
+
+- `OSError: [Errno 22] Invalid argument` 是 pywinauto `process_module()` / `process_get_modules()` 枚举系统受保护进程时的副作用，**不代表同花顺终端断连**。
+- `_classify()` 中必须将其映射为 `THS_BUSY`（409，临时性可重试），**绝不能**映射为 `THS_NOT_FOUND`（404，会触发 `with_lock` 清空 trader 导致恶性循环）。
+
+### THS Edit 控件输入方法
+
+- **禁止** `WM_SETTEXT("")` 清空 THS 验证码输入框——会破坏控件内部状态，导致后续 `WM_CHAR` 被吞掉、输入框实际为空。
+- **正确做法**：`EM_SETSEL(0, -1)` 全选 + `WM_CHAR` 逐字符覆盖（第一个字符自动替换选中内容）。
+- `WM_CLEAR` 也不可靠（部分时序下选中文本未生效）。
+- `GetWindowText` 无法读取 THS 自定义 Edit 控件文本，`actual=` 为空不代表输入失败。

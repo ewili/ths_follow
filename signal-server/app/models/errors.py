@@ -62,11 +62,13 @@ def _classify(exc: Exception) -> tuple[str, int, str]:
     if type_name == "TimeoutError" or (isinstance(exc, OSError) and "timeout" in exc_str.lower()):
         return THS_NOT_FOUND, 404, "连接同花顺终端超时，请确认终端已启动"
 
-    # OSError [Errno 22]：可能是进程枚举失败，也可能是日志 flush（pywinauto 导入阶段）
+    # OSError [Errno 22]：Windows API GetModuleFileNameEx 对受保护系统进程抛出。
+    # 这是 pywinauto 进程枚举的副作用，不代表同花顺终端本身断连。
+    # 映射为 THS_BUSY（临时性可重试），避免 with_lock 误判为连接丢失而清空 trader。
     if isinstance(exc, OSError) and getattr(exc, "errno", None) == 22:
         if "flush" in exc_lower or "actionlogger" in exc_lower or "pywinauto" in exc_lower:
             return THS_UNKNOWN, 500, "终端自动化组件初始化失败，请重试；若仍失败请重启后端服务"
-        return THS_NOT_FOUND, 404, "终端进程枚举失败，请确认同花顺已启动并完成登录"
+        return THS_BUSY, 409, "终端进程枚举遇到受保护进程，请稍后重试"
 
     # pywinauto.application.AppNotConnected
     if type_name == "AppNotConnected":
