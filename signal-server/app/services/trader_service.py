@@ -160,18 +160,13 @@ class TraderService:
                         import win32gui
                         import win32process
                         fg_hwnd = win32gui.GetForegroundWindow()
-                        if fg_hwnd and fg_hwnd != wrapper.handle:
-                            _, fg_pid = win32process.GetWindowThreadProcessId(fg_hwnd)
-                            _, cur_pid = win32process.GetWindowThreadProcessId(wrapper.handle)
-                            if fg_pid != cur_pid:
-                                fg_tid = ctypes.windll.kernel32.GetThreadId(ctypes.windll.kernel32.OpenThread(0x1FFFFF, False, fg_pid))
-                                cur_tid = ctypes.windll.kernel32.GetCurrentThreadId()
-                                if fg_tid and cur_tid and fg_tid != cur_tid:
-                                    ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, True)
-                                    SetForegroundWindow(wrapper)
-                                    ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, False)
-                                else:
-                                    SetForegroundWindow(wrapper)
+                        fg_tid, fg_pid = win32process.GetWindowThreadProcessId(fg_hwnd)
+                        cur_tid, cur_pid = win32process.GetWindowThreadProcessId(wrapper.handle)
+                        if fg_pid != cur_pid:
+                            if fg_tid and cur_tid and fg_tid != cur_tid:
+                                ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, True)
+                                SetForegroundWindow(wrapper)
+                                ctypes.windll.user32.AttachThreadInput(cur_tid, fg_tid, False)
                             else:
                                 SetForegroundWindow(wrapper)
                         else:

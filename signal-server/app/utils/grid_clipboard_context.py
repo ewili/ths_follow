@@ -41,7 +41,7 @@ def looks_like_position_keys(keys: set[str]) -> bool:
 
 def records_match_grid_page(records: list[dict], page: str) -> bool:
     if not records:
-        return page in _ENTRUST_GRID_PAGES
+        return True
     keys = set(records[0].keys())
     if page in _ENTRUST_GRID_PAGES:
         if keys & _ENTRUST_CLIPBOARD_KEYS:
