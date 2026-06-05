@@ -1154,7 +1154,33 @@ def _patched_copy_get(self: Copy, control_id: int):
                     clip_page,
                 )
 
-    grid.type_keys("^A^C", set_foreground=False, pause=0.2)
+    for _copy_attempt in range(3):
+        try:
+            grid.type_keys("^A^C", set_foreground=False, pause=0.2)
+            break
+        except Exception as _copy_exc:
+            if _copy_attempt >= 2:
+                _log(
+                    logging.ERROR,
+                    "Copy.get: grid.type_keys failed after %d attempts: %s",
+                    _copy_attempt + 1,
+                    _copy_exc,
+                )
+                raise
+            exc_name = type(_copy_exc).__name__
+            if exc_name not in ("ElementNotVisible", "ElementNotEnabled"):
+                raise
+            _log(
+                logging.WARNING,
+                "Copy.get: grid not visible/enabled (%s), closing pop dialog and retrying (attempt %d)",
+                exc_name,
+                _copy_attempt + 1,
+            )
+            try:
+                self._trader.close_pop_dialog()
+            except Exception:
+                pass
+            self._trader.wait(0.5)
     content = self._get_clipboard_data()
     result = self._format_grid_data(content)
     if result is not None:

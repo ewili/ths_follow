@@ -183,7 +183,7 @@ class SignalService:
                 entrusts: Optional[list] = None
                 balance: Optional[dict] = None
                 positions: Optional[list] = None
-                need_funds = (
+                need_funds = include_funds and (
                     not self._cache_valid("balance")
                     or not self._cache_valid("position")
                 )
@@ -200,19 +200,19 @@ class SignalService:
 
             now_dt = datetime.now()
             expires_at = time.monotonic() + TTL_SECONDS
-            if entrusts is not None:
+            if include_entrusts and entrusts is not None:
                 self._cache["entrusts"] = _CacheEntry(
                     value=entrusts,
                     fetched_at=now_dt,
                     expires_at=expires_at,
                 )
-            if balance is not None:
+            if include_funds and balance is not None:
                 self._cache["balance"] = _CacheEntry(
                     value=balance,
                     fetched_at=now_dt,
                     expires_at=expires_at,
                 )
-            if positions is not None:
+            if include_funds and positions is not None:
                 self._cache["position"] = _CacheEntry(
                     value=positions,
                     fetched_at=now_dt,
@@ -256,7 +256,11 @@ class SignalService:
         """
         if key in ("entrusts", "balance", "position"):
             include_entrusts = key == "entrusts"
-            await self._ensure_snapshot_cached(include_entrusts=include_entrusts)
+            include_funds = key in ("balance", "position")
+            await self._ensure_snapshot_cached(
+                include_entrusts=include_entrusts,
+                include_funds=include_funds,
+            )
 
         # 阶段 1：快路径（dict.get 是 asyncio 单线程下的原子操作）
         entry = self._cache.get(key)

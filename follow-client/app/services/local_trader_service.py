@@ -378,38 +378,51 @@ class LocalTraderService:
 
     async def get_follow_snapshot(
         self,
+        include_balance: bool = True,
     ) -> tuple[list[dict], list[dict], dict]:
-        """单次锁内拉取资金股票页 + 当日委托，减少复制触发的验证码次数。
+        """单次锁内拉取持仓 + 当日委托（+可选资金），减少复制触发的验证码次数。
 
         返回 (positions, today_entrusts, balance)。
+        include_balance=False 时跳过资金数据缓存，仍读持仓（卖出需可用股数）。
         """
         if self._is_schedule_paused():
             return [], [], {}
         self._require_trader()
 
-        if all(self._cache_valid_key(k) for k in ("position", "entrusts", "balance")):
-            return (
-                self._cache["position"][1],
-                self._cache["entrusts"][1],
-                self._cache["balance"][1],
-            )
-
-        def _snapshot() -> tuple[list[dict], list[dict], dict]:
-            from app.utils.ths_gui_fetch import fetch_funds_stock, fetch_today_entrusts
-
-            balance, positions = fetch_funds_stock(self._trader)
-            entrusts = fetch_today_entrusts(self._trader)
+        cache_keys = ("position", "entrusts", "balance") if include_balance else ("position", "entrusts")
+        if all(self._cache_valid_key(k) for k in cache_keys):
+            positions = self._cache["position"][1]
+            entrusts = self._cache["entrusts"][1]
+            balance = self._cache["balance"][1] if include_balance and self._cache_valid_key("balance") else {}
             return positions, entrusts, balance
+
+        if include_balance:
+            def _snapshot() -> tuple[list[dict], list[dict], dict]:
+                from app.utils.ths_gui_fetch import fetch_funds_stock, fetch_today_entrusts
+
+                balance, positions = fetch_funds_stock(self._trader)
+                entrusts = fetch_today_entrusts(self._trader)
+                return positions, entrusts, balance
+        else:
+            def _snapshot() -> tuple[list[dict], list[dict], dict]:
+                from app.utils.ths_gui_fetch import fetch_funds_stock, fetch_today_entrusts
+
+                _, positions = fetch_funds_stock(self._trader)
+                entrusts = fetch_today_entrusts(self._trader)
+                return positions, entrusts, {}
 
         positions, entrusts, balance = await self._run_blocking(
             _snapshot, "follow_snapshot"
         )
         expires = time.monotonic() + _TTL_SECONDS
-        self._cache["balance"] = (expires, balance)
+        if include_balance and balance:
+            self._cache["balance"] = (expires, balance)
         self._cache["position"] = (expires, positions)
         self._cache["entrusts"] = (expires, entrusts)
-        logger.info("event=local_follow_snapshot cached position=%d entrusts=%d",
-                    len(positions), len(entrusts))
+        logger.info(
+            "event=local_follow_snapshot include_balance=%s cached position=%d entrusts=%d",
+            include_balance, len(positions), len(entrusts),
+        )
         return positions, entrusts, balance
 
     # ── 连接管理 ─────────────────────────────────────────────

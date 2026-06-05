@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
-import { ElButton, ElMessage, ElRadioGroup, ElRadioButton } from 'element-plus'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { ElButton, ElMessage } from 'element-plus'
 import { getSignalStatus, startSignal, stopSignal } from '@/api/signal'
 import { getDashboardStatus } from '@/api/system'
 import { getErrorMessage } from '@/api/http'
@@ -22,7 +22,6 @@ const connection = ref<ConnectionStatus>({
   last_connect_at: null,
 })
 
-const selectedMode = ref<'ratio' | 'multiplier'>('ratio')
 const action = ref<'start' | 'stop' | ''>('')
 
 let connectionTimer: number | null = null
@@ -36,8 +35,6 @@ const hint = computed(() =>
     ? '跟单端现在可以基于 Signal Server 的运行态进行消费。'
     : '停止后不会清空已保存配置，但运行态会立即切回停止。',
 )
-
-const isRunning = computed(() => status.value.state === 'running')
 
 function formatTime(value: string | null) {
   return value ? new Date(value).toLocaleString('zh-CN') : '--'
@@ -69,7 +66,7 @@ async function onStart() {
   }
   action.value = 'start'
   try {
-    status.value = await startSignal(selectedMode.value)
+    status.value = await startSignal()
     ElMessage.success('喊单已启动')
   } catch (err) {
     ElMessage.error(getErrorMessage(err))
@@ -90,15 +87,7 @@ async function onStop() {
   }
 }
 
-// 运行中时，同步显示当前模式；停止时允许选择
-watch(
-  () => status.value.signal_mode,
-  (mode) => {
-    if (isRunning.value) {
-      selectedMode.value = mode
-    }
-  },
-)
+const modeLabel = computed(() => status.value.signal_mode === 'multiplier' ? '倍数' : '资金比例')
 
 onMounted(() => {
   void refresh()
@@ -133,22 +122,9 @@ onUnmounted(() => {
         <span>启动时间</span>
         <strong>{{ formatTime(status.started_at) }}</strong>
       </div>
-    </div>
-
-    <!-- 喊单模式选择 -->
-    <div class="mode-section">
-      <div class="mode-label">喊单模式</div>
-      <ElRadioGroup v-model="selectedMode" :disabled="isRunning" size="default">
-        <ElRadioButton value="ratio">资金比例</ElRadioButton>
-        <ElRadioButton value="multiplier">倍数</ElRadioButton>
-      </ElRadioGroup>
-      <div class="mode-hint">
-        <template v-if="selectedMode === 'ratio'">
-          资金比例模式：委托按总资产占比换算，跟单端需拉取资金数据。
-        </template>
-        <template v-else>
-          倍数模式：仅拉取委托数据，减少 GUI 调用和验证码触发，跟单端按倍数跟单。
-        </template>
+      <div class="timeline-item">
+        <span>喊单模式</span>
+        <strong>{{ modeLabel }}</strong>
       </div>
     </div>
 
@@ -252,27 +228,6 @@ onUnmounted(() => {
   display: block;
   margin-top: 8px;
   font-size: 16px;
-}
-
-.mode-section {
-  margin-top: 18px;
-  padding: 14px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: var(--panel-muted);
-}
-
-.mode-label {
-  font-size: 12px;
-  color: var(--muted);
-  margin-bottom: 10px;
-}
-
-.mode-hint {
-  margin-top: 10px;
-  font-size: 12px;
-  color: var(--muted);
-  line-height: 1.5;
 }
 
 .hint {

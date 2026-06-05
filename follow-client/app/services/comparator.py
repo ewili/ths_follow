@@ -63,6 +63,7 @@ def compare_and_decide(
     start_timestamp: Optional[datetime] = None,
     follow_mode: str = "ratio",
     follow_multiplier: float = 1.0,
+    followed_entrust_nos: Optional[dict[str, str]] = None,
 ) -> list[FollowAction]:
     """生成本轮需要执行的跟单指令列表。
 
@@ -72,7 +73,11 @@ def compare_and_decide(
         start_timestamp: 冷启动时间戳；None 表示全量对齐。
         follow_mode: 跟单模式（ratio / multiplier）
         follow_multiplier: 跟单倍数（仅 multiplier 模式使用）
+        followed_entrust_nos: 当日已成功跟随的本地委托编号映射（entrust_no → stock_code），
+                              用于双重保险时只匹配跟单系统委托，忽略手动交易。
     """
+    if followed_entrust_nos is None:
+        followed_entrust_nos = {}
     actions: list[FollowAction] = []
 
     pos_map: dict[str, int] = {}
@@ -151,17 +156,19 @@ def compare_and_decide(
         if has_followed(sig.entrust_no, "buy"):
             continue
 
-        # 双重保险：本地已有匹配买单且未撤，跳过（防止崩溃后重复下单）
-        local_buy = _find_local_entrust(
+        # 双重保险：跟单系统已下过且本地仍有未终态的买单 → 跳过（防止崩溃后重复下单）
+        # 只检查 follow_records 中已成功的委托，忽略用户手动交易的委托
+        local_buy = _find_followed_local_entrust(
             local_entrusts,
+            followed_entrust_nos=followed_entrust_nos,
             stock_code=sig.stock_code,
             direction="买入",
             exclude_statuses=_SETTLED_STATUSES,
         )
         if local_buy:
             local_no = str(local_buy.get(_KEY_ENTRUST_NO, ""))
-            logger.warning(
-                "local_buy_exists_but_no_record stock=%s signal_no=%s local_no=%s",
+            logger.debug(
+                "local_buy_exists_in_follow_records stock=%s signal_no=%s local_no=%s",
                 sig.stock_code, sig.entrust_no, local_no
             )
             continue
@@ -197,15 +204,21 @@ def compare_and_decide(
             logger.debug("no_position skip sell stock=%s", sig.stock_code)
             continue
 
-        # 双重保险：本地已有匹配卖单且未撤，跳过
-        local_sell = _find_local_entrust(
+        # 双重保险：跟单系统已下过且本地仍有未撤的卖单 → 跳过
+        # 只检查 follow_records 中已成功的委托，忽略用户手动交易的委托
+        local_sell = _find_followed_local_entrust(
             local_entrusts,
+            followed_entrust_nos=followed_entrust_nos,
             stock_code=sig.stock_code,
             direction="卖出",
             exclude_statuses={"已撤", "部撤"},
         )
         if local_sell:
-            logger.debug("local_sell_exists skip stock=%s", sig.stock_code)
+            local_no = str(local_sell.get(_KEY_ENTRUST_NO, ""))
+            logger.debug(
+                "local_sell_exists_in_follow_records stock=%s local_no=%s",
+                sig.stock_code, local_no
+            )
             continue
 
         actions.append(FollowAction(
@@ -232,12 +245,44 @@ def _find_local_entrust(
     direction: str,
     exclude_statuses: set[str],
 ) -> Optional[dict]:
-    """在本地当日委托中找匹配的委托（股票代码 + 方向 + 非终态）。"""
+    """在本地当日委托中找匹配的委托（股票代码 + 方向 + 非终态）。
+
+    注意：此函数按股票代码+方向模糊匹配，无法区分手动委托与跟单委托。
+    双重保险场景请使用 _find_followed_local_entrust() 代替。
+    """
     for e in local_entrusts:
         code = str(e.get(_KEY_STOCK_CODE, e.get("stock_code", "")))
         raw_dir = str(e.get(_KEY_DIRECTION, e.get("direction", "")))
         status = _normalize_status(str(e.get(_KEY_STATUS, e.get("status", ""))))
         if code == stock_code and _local_direction(raw_dir) == direction and status not in exclude_statuses:
+            return e
+    return None
+
+
+def _find_followed_local_entrust(
+    local_entrusts: list[dict],
+    followed_entrust_nos: dict[str, str],
+    stock_code: str,
+    direction: str,
+    exclude_statuses: set[str],
+) -> Optional[dict]:
+    """在本地当日委托中找匹配的跟单系统委托（合同编号 in followed_entrust_nos + 同股票 + 方向 + 非终态）。
+
+    与 _find_local_entrust() 不同，此函数通过合同编号精确匹配，
+    只会命中跟单系统自己下的委托，不会误判用户手动交易的委托。
+    同时校验 stock_code，确保不会跨股票误判。
+    """
+    for e in local_entrusts:
+        no = str(e.get(_KEY_ENTRUST_NO, e.get("entrust_no", "")))
+        raw_dir = str(e.get(_KEY_DIRECTION, e.get("direction", "")))
+        status = _normalize_status(str(e.get(_KEY_STATUS, e.get("status", ""))))
+        matched_stock = followed_entrust_nos.get(no)
+        if (
+            matched_stock is not None
+            and matched_stock == stock_code
+            and _local_direction(raw_dir) == direction
+            and status not in exclude_statuses
+        ):
             return e
     return None
 

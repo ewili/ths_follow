@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from fastapi import APIRouter, Query
+from fastapi import APIRouter
 
 from app.db import stock_repository
 from app.models.errors import THS_BUSY, THS_NOT_LOGGED_IN, ThsConnectError
@@ -17,7 +17,6 @@ from app.models.signal import (
     SignalEntrustsResponse,
     SignalPositionsResponse,
 )
-from typing import Literal
 from app.models.system_status import SignalModeResponse, SignalRuntimeStatus
 from app.services.signal_runtime_service import SignalRuntimeService
 from app.services.signal_service import (
@@ -49,17 +48,15 @@ async def get_signal_mode() -> SignalModeResponse:
 
 
 @router.post("/start", response_model=SignalRuntimeStatus)
-async def start_signal(
-    signal_mode: Literal["ratio", "multiplier"] = Query("ratio", description="喊单模式"),
-) -> SignalRuntimeStatus:
-    """启动喊单。要求终端已连接。"""
+async def start_signal() -> SignalRuntimeStatus:
+    """启动喊单。要求终端已连接。模式从配置中读取。"""
     if TraderService.get().trader is None:
         raise ThsConnectError(
             status_code=409,
             code=THS_NOT_LOGGED_IN,
             message="终端未连接，不能启动喊单",
         )
-    return SignalRuntimeService.get().start(signal_mode=signal_mode)
+    return SignalRuntimeService.get().start()
 
 
 @router.post("/stop", response_model=SignalRuntimeStatus)

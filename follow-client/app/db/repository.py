@@ -419,6 +419,30 @@ def get_records_page(
         conn.close()
 
 
+def get_today_successful_entrust_nos() -> dict[str, str]:
+    """返回当日所有成功跟随的本地委托编号映射（entrust_no → stock_code）。
+
+    用于双重保险逻辑：只匹配跟单系统自己下的委托，忽略用户手动交易。
+    同时保留 stock_code 映射，确保双重保险不会跨股票误判。
+    """
+    today = date.today().isoformat()
+    conn = _get_conn()
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT entrust_no, stock_code FROM follow_records
+            WHERE created_at >= ?
+              AND action IN ('buy', 'sell')
+              AND status = 'success'
+              AND entrust_no IS NOT NULL
+            """,
+            (today,),
+        ).fetchall()
+        return {row[0]: row[1] for row in rows}
+    finally:
+        conn.close()
+
+
 def get_local_entrust_nos_by_signal(signal_entrust_no: str) -> list[str]:
     """查询与喊单委托关联的所有本地委托编号（仅成功跟随的 buy/sell 记录）。
     

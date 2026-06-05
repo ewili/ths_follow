@@ -212,7 +212,7 @@ class FollowEngine:
             if self._follow_mode == "multiplier":
                 # 倍数模式：仅拉持仓和委托（卖出需可用持仓），不拉资金
                 local_positions, local_entrusts, _ = (
-                    await trader.get_follow_snapshot()
+                    await trader.get_follow_snapshot(include_balance=False)
                 )
                 local_balance_dict = {}
             else:
@@ -236,6 +236,7 @@ class FollowEngine:
         total_assets = float(local_balance_dict.get("总资产", local_balance_dict.get("total_assets", 0.0)) or 0.0)
 
         # 3. 对比决策
+        followed_entrust_nos = repository.get_today_successful_entrust_nos()
         actions = comparator.compare_and_decide(
             signal_entrusts=signal_entrusts,
             local_positions=local_positions,
@@ -244,6 +245,7 @@ class FollowEngine:
             start_timestamp=self._start_timestamp,
             follow_mode=self._follow_mode,
             follow_multiplier=self._follow_multiplier,
+            followed_entrust_nos=followed_entrust_nos,
         )
 
         if not actions:

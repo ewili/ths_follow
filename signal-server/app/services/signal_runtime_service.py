@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Optional
-
 from typing import Literal, Optional
 
 from app.core.schedule_guard import is_within_schedule
@@ -35,22 +33,34 @@ class SignalRuntimeService:
 
     def get_status(self) -> SignalRuntimeStatus:
         schedule_active = True
+        cfg = None
         if self._state == "running":
             cfg = repository.load_config()
             if cfg.schedule_enabled:
                 time_ranges_dicts = [tr.model_dump() for tr in cfg.schedule_time_ranges]
                 schedule_active = is_within_schedule(cfg.schedule_weekdays, time_ranges_dicts)
+        # 未运行时从配置读取 signal_mode，与 get_mode() 行为一致
+        if self._state == "running":
+            effective_mode = self._signal_mode
+        else:
+            if cfg is None:
+                cfg = repository.load_config()
+            effective_mode = cfg.signal_mode
         return SignalRuntimeStatus(
             state=self._state,
             started_at=self._started_at,
             last_changed_at=self._last_changed_at,
             schedule_active=schedule_active,
-            signal_mode=self._signal_mode,
+            signal_mode=effective_mode,
         )
 
-    def start(self, signal_mode: Literal["ratio", "multiplier"] = "ratio") -> SignalRuntimeStatus:
+    def start(self, signal_mode: Literal["ratio", "multiplier"] | None = None) -> SignalRuntimeStatus:
         now = datetime.utcnow()
         if self._state != "running":
+            # 优先使用调用方传入的模式；未指定时从数据库配置读取
+            if signal_mode is None:
+                cfg = repository.load_config()
+                signal_mode = cfg.signal_mode
             self._state = "running"
             self._signal_mode = signal_mode
             self._started_at = now

@@ -13,8 +13,8 @@ export function getSignalMode() {
   )
 }
 
-export function startSignal(signalMode: 'ratio' | 'multiplier' = 'ratio') {
-  return fetch(`${BASE}/start?signal_mode=${encodeURIComponent(signalMode)}`, { method: 'POST' }).then((r) =>
+export function startSignal() {
+  return fetch(`${BASE}/start`, { method: 'POST' }).then((r) =>
     requestJson<SignalRuntimeStatus>(r),
   )
 }
