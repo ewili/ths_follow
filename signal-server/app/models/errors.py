@@ -52,6 +52,10 @@ def _classify(exc: Exception) -> tuple[str, int, str]:
     if type_name == "ElementNotFoundError":
         if "timeout" in exc_lower or "timed out" in exc_lower:
             return THS_NOT_FOUND, 404, "查询同花顺控件超时（可能窗口被遮挡或弹窗阻塞），请确认终端前台可见"
+        # 弹窗遮挡主窗口时，SysTreeView32/菜单树等控件因父窗口 Hidden 而不可见，
+        # 属临时性可重试，不能映射为 THS_NOT_FOUND（会清空 trader 导致恶性循环）
+        if "systreeview32" in exc_lower or "hidden" in exc_lower:
+            return THS_BUSY, 409, "终端控件被弹窗遮挡或不可见（临时性），请确认同花顺客户端前台可见"
         return THS_NOT_FOUND, 404, "终端未找到或未登录，请确认同花顺已启动并完成登录"
 
     # pywinauto.application.ProcessNotFoundError

@@ -568,10 +568,11 @@ def _captcha_recognize_vlm(img_path: str, api_key: str, call_count: int = 3) -> 
                 continue
             filtered_results.append(r)
 
-        # 如果全部被过滤，回退使用原始结果（幻觉过滤不应导致完全无结果）
+        # 如果全部被过滤为幻觉，不回退使用原始结果（输入已知的幻觉值必然失败，不如重新识别）
         if not filtered_results:
-            _log(logging.WARNING, "captcha VLM: all results filtered as hallucination, using unfiltered")
-            filtered_results = raw_results
+            _log(logging.WARNING, "captcha VLM: all %d results filtered as hallucination, returning empty (will re-recognize)",
+                 len(raw_results))
+            return "", []
 
         # 投票策略：按大写分组，选票数最多的组
         upper_groups = {}
@@ -892,90 +893,99 @@ def _process_captcha_dialog(
                 pass
             continue
 
-        captcha_try = variants[0]
-        _log(
-            logging.INFO,
-            "%scaptcha trying best variant (attempt %d): %s",
-            prefix,
-            attempt + 1,
-            captcha_try,
-        )
-
-        editor = None
-        try:
-            editor = dlg.child_window(control_id=0x964, class_name="Edit")
-            if not editor.exists():
-                editor = None
-        except Exception:
-            editor = None
-
-        if editor is None:
-            for child in dlg.children(class_name="Edit"):
-                try:
-                    if child.is_visible():
-                        editor = child
-                        _log(
-                            logging.WARNING,
-                            "%scaptcha edit control fallback to first visible Edit",
-                            prefix,
-                        )
-                        break
-                except Exception:
-                    continue
-
-        if editor is None:
-            _log(logging.ERROR, "%scaptcha edit control not found (attempt %d)", prefix, attempt)
-            break
-
-        try:
-            editor.set_focus()
-        except Exception:
-            pass
-        trader.wait(0.1)
-        try:
-            _type_captcha_via_wm_char(editor, captcha_try)
-        except Exception as e:
-            _log(logging.ERROR, "%scaptcha type failed (attempt %d): %s", prefix, attempt, e)
-            continue
-        trader.wait(0.1)
-
-        try:
-            dlg.child_window(title="确定").click()
-        except Exception:
-            try:
-                dlg.type_keys("{ENTER}", set_foreground=False, pause=0.1)
-            except Exception:
-                pass
-
-        trader.wait(0.5)
-
-        if _find_captcha_dialog(trader, timeout=0.5) is None:
+        # 逐变体尝试：先尝试所有变体（大小写等），全部失败再刷新图片
+        for vi, captcha_try in enumerate(variants):
             _log(
                 logging.INFO,
-                "%s验证码验证成功-->%s (variant %d/%d)",
+                "%scaptcha trying variant %d/%d (attempt %d): %s",
+                prefix,
+                vi + 1,
+                len(variants),
+                attempt + 1,
+                captcha_try,
+            )
+
+            editor = None
+            try:
+                editor = dlg.child_window(control_id=0x964, class_name="Edit")
+                if not editor.exists():
+                    editor = None
+            except Exception:
+                editor = None
+
+            if editor is None:
+                for child in dlg.children(class_name="Edit"):
+                    try:
+                        if child.is_visible():
+                            editor = child
+                            _log(
+                                logging.WARNING,
+                                "%scaptcha edit control fallback to first visible Edit",
+                                prefix,
+                            )
+                            break
+                    except Exception:
+                        continue
+
+            if editor is None:
+                _log(logging.ERROR, "%scaptcha edit control not found (attempt %d)", prefix, attempt)
+                break
+
+            try:
+                editor.set_focus()
+            except Exception:
+                pass
+            trader.wait(0.1)
+            try:
+                _type_captcha_via_wm_char(editor, captcha_try)
+            except Exception as e:
+                _log(logging.ERROR, "%scaptcha type failed (attempt %d): %s", prefix, attempt, e)
+                continue
+            trader.wait(0.1)
+
+            try:
+                dlg.child_window(title="确定").click()
+            except Exception:
+                try:
+                    dlg.type_keys("{ENTER}", set_foreground=False, pause=0.1)
+                except Exception:
+                    pass
+
+            trader.wait(0.5)
+
+            if _find_captcha_dialog(trader, timeout=0.5) is None:
+                _log(
+                    logging.INFO,
+                    "%s验证码验证成功-->%s (variant %d/%d)",
+                    prefix,
+                    captcha_try,
+                    vi + 1,
+                    len(variants),
+                )
+                found = True
+                Copy._need_captcha_reg = False
+                mark_captcha_cooldown()
+                break
+
+            _log(
+                logging.WARNING,
+                "%scaptcha still present after input %s (variant %d/%d)",
                 prefix,
                 captcha_try,
-                attempt + 1,
+                vi + 1,
                 len(variants),
             )
-            found = True
-            Copy._need_captcha_reg = False
-            mark_captcha_cooldown()
+
+        # 如果验证码已通过，跳出外层 attempt 循环
+        if found:
             break
 
-        _log(
-            logging.WARNING,
-            "%scaptcha still present after input %s (variant %d/%d)",
-            prefix,
-            captcha_try,
-            attempt + 1,
-            len(variants),
-        )
+        # 所有变体均失败，刷新验证码图片重新识别
         _log(
             logging.INFO,
-            "%scaptcha variant %s failed for %s, clicking image to refresh",
+            "%scaptcha all %d variants failed for %s, clicking image to refresh",
             prefix,
-            captcha_try,
+            len(variants),
             captcha_num.upper(),
         )
         wait_time = 1.0 + attempt * 0.5

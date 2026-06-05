@@ -41,5 +41,13 @@ api_test_results.json
 Thumbs.db
 tmp.png
 
+# ===== 验证码调试产物 =====
+**/captcha_debug/
+
+# ===== 压缩包 =====
+*.rar
+*.zip
+*.7z
+
 # ===== Vite 本地配置 =====
 *.local
