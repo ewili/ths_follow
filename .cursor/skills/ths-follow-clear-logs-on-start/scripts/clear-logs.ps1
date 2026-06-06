@@ -1,5 +1,15 @@
 # 清空 signal-server / follow-client 的 logs 目录（*.log 及 TimedRotating 后缀文件）
-$RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+# Fallback: 当 $PSScriptRoot 为空时（某些 cmd -> powershell -File 调用场景），手动推算
+if ($PSScriptRoot) {
+    $RepoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..\..\..\..")).Path
+} else {
+    $RepoRoot = (Resolve-Path (Join-Path $MyInvocation.PSCommandPath "..\..\..\..\..")).Path
+    if (-not $RepoRoot) {
+        # 最后手段：基于脚本自身位置硬编码相对路径
+        $RepoRoot = "D:\ewili\fileDoc\code\ths_follow"
+        Write-Warning "PSScriptRoot was empty; using hardcoded RepoRoot: $RepoRoot"
+    }
+}
 
 $removed = @()
 $failed = @()

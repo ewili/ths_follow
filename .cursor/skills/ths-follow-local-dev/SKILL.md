@@ -112,6 +112,14 @@ Invoke-RestMethod -Uri "http://127.0.0.1:8100/api/trader/connect" -Method POST -
 | 跟单 Web / API | http://127.0.0.1:8100/ 、/docs |
 | 仪表盘状态 | `GET /api/system/status` |
 
+**验证服务是否启动**（默认 shell 为 cmd 时，**不要用** `powershell -Command` 内联验证，`$r`/`$_.Exception` 等变量会被 cmd 吞掉导致语法错误）：
+
+```cmd
+python -c "import urllib.request; r=urllib.request.urlopen('http://127.0.0.1:8000/docs',timeout=5); print('signal-server:', r.status); r=urllib.request.urlopen('http://127.0.0.1:8100/docs',timeout=5); print('follow-client:', r.status)"
+```
+
+返回 `200` 即服务正常。PowerShell 交互式会话中 `Invoke-WebRequest` 仍可用。
+
 喊单引擎默认 `stopped`，需在 Web「喊单控制」或对应 API 手动启动。
 
 ## Windows PowerShell
