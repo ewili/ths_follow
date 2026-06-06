@@ -38,9 +38,9 @@ const traderState = computed(() => traderStatus.value?.state ?? 'disconnected')
 const traderConnected = computed(() => traderState.value === 'connected')
 const todayRecordsCount = computed(() => followStatus.value?.today_records_count ?? 0)
 
-// 当勾选冷启动对齐 + 有旧记录时，提示需要清空
-const showColdStartWarning = computed(
-  () => coldStartAlign.value && todayRecordsCount.value > 0 && !isRunning.value,
+// 当勾选冷启动对齐且引擎未运行时，显示记录相关提示区
+const showColdStartBlock = computed(
+  () => coldStartAlign.value && !isRunning.value,
 )
 
 function formatTime(value: string | null | undefined) {
@@ -204,18 +204,23 @@ async function onClearTodayRecords() {
       <div class="field-warning">
         默认关闭。开启后可能跟入喊单端已存在的存量委托。
       </div>
-      <div v-if="showColdStartWarning" class="cold-start-warning">
-        <div class="warning-text">
-          当前有 {{ todayRecordsCount }} 条今日跟单记录，可能导致防重复机制误判而跳过存量委托。
+      <div v-if="showColdStartBlock" class="cold-start-block">
+        <template v-if="todayRecordsCount > 0">
+          <div class="warning-text">
+            当前有 {{ todayRecordsCount }} 条今日跟单记录，可能导致防重复机制误判而跳过存量委托。
+          </div>
+          <ElButton
+            type="warning"
+            size="small"
+            :loading="clearLoading"
+            @click="onClearTodayRecords"
+          >
+            清空今日记录
+          </ElButton>
+        </template>
+        <div v-else class="no-records-hint">
+          当前无今日跟单记录，存量对齐无需清空。
         </div>
-        <ElButton
-          type="warning"
-          size="small"
-          :loading="clearLoading"
-          @click="onClearTodayRecords"
-        >
-          清空今日记录
-        </ElButton>
       </div>
     </div>
 
@@ -339,7 +344,7 @@ async function onClearTodayRecords() {
   color: #e6a23c;
 }
 
-.cold-start-warning {
+.cold-start-block {
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -351,9 +356,15 @@ async function onClearTodayRecords() {
   border-radius: 6px;
 }
 
-.cold-start-warning .warning-text {
+.cold-start-block .warning-text {
   font-size: 12px;
   color: #e6a23c;
+  line-height: 1.5;
+}
+
+.no-records-hint {
+  font-size: 12px;
+  color: #67c23a;
   line-height: 1.5;
 }
 
