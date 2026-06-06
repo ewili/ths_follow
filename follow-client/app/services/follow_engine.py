@@ -107,6 +107,7 @@ class FollowEngine:
             start_time=self._start_time if self._running else None,
             follow_mode=self._follow_mode if self._running else repository.load_config().follow_mode,
             follow_multiplier=self._follow_multiplier if self._running else repository.load_config().follow_multiplier,
+            today_records_count=repository.get_today_records_count(),
         )
 
     # ── 轮询核心 ─────────────────────────────────────────────

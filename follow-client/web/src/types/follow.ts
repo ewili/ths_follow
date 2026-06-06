@@ -4,6 +4,7 @@ export interface FollowStatusResponse {
   start_time: string | null
   follow_mode: 'ratio' | 'multiplier'
   follow_multiplier: number
+  today_records_count: number
 }
 
 export type TraderConnectionState = 'disconnected' | 'connected' | 'error'

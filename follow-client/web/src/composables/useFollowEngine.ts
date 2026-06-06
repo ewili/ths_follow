@@ -6,6 +6,7 @@ export function useFollowEngine() {
   const status = ref<FollowStatusResponse | null>(null)
   const startLoading = ref(false)
   const stopLoading = ref(false)
+  const clearLoading = ref(false)
   const error = ref('')
 
   let timer: number | null = null
@@ -50,6 +51,22 @@ export function useFollowEngine() {
     }
   }
 
+  async function clearTodayRecords() {
+    clearLoading.value = true
+    try {
+      const result = await followApi.clearTodayRecords()
+      error.value = ''
+      await refresh()
+      return result.deleted
+    } catch (err) {
+      const e = err as { detail?: string; message?: string }
+      error.value = e.detail ?? e.message ?? '清空记录失败'
+      return -1
+    } finally {
+      clearLoading.value = false
+    }
+  }
+
   onMounted(() => {
     void refresh()
     timer = window.setInterval(() => void refresh(), 3000)
@@ -63,9 +80,11 @@ export function useFollowEngine() {
     status,
     startLoading,
     stopLoading,
+    clearLoading,
     error,
     refresh,
     start,
     stop,
+    clearTodayRecords,
   }
 }

@@ -5,6 +5,7 @@ import {
   ElCard,
   ElCheckbox,
   ElMessage,
+  ElMessageBox,
   ElTag,
 } from 'element-plus'
 import { useFollowEngine } from '@/composables/useFollowEngine'
@@ -14,9 +15,11 @@ const {
   status: followStatus,
   startLoading,
   stopLoading,
+  clearLoading,
   error: followError,
   start,
   stop,
+  clearTodayRecords,
 } = useFollowEngine()
 
 const {
@@ -33,6 +36,12 @@ const coldStartAlign = ref(false)
 const isRunning = computed(() => followStatus.value?.running ?? false)
 const traderState = computed(() => traderStatus.value?.state ?? 'disconnected')
 const traderConnected = computed(() => traderState.value === 'connected')
+const todayRecordsCount = computed(() => followStatus.value?.today_records_count ?? 0)
+
+// 当勾选冷启动对齐 + 有旧记录时，提示需要清空
+const showColdStartWarning = computed(
+  () => coldStartAlign.value && todayRecordsCount.value > 0 && !isRunning.value,
+)
 
 function formatTime(value: string | null | undefined) {
   return value ? new Date(value).toLocaleString('zh-CN') : '-'
@@ -73,6 +82,24 @@ async function onStop() {
     ElMessage.error(followError.value)
   } else if (ok) {
     ElMessage.success('跟单引擎已停止')
+  }
+}
+
+async function onClearTodayRecords() {
+  try {
+    await ElMessageBox.confirm(
+      `确定清空今日全部 ${todayRecordsCount.value} 条跟单记录？\n清空后，存量对齐模式将能重新跟随之前已标记为"已跟随"的委托。`,
+      '清空今日跟单记录',
+      { confirmButtonText: '确定清空', cancelButtonText: '取消', type: 'warning' },
+    )
+  } catch {
+    return // 用户取消
+  }
+  const deleted = await clearTodayRecords()
+  if (deleted >= 0) {
+    ElMessage.success(`已清空 ${deleted} 条今日跟单记录`)
+  } else if (followError.value) {
+    ElMessage.error(followError.value)
   }
 }
 </script>
@@ -164,6 +191,10 @@ async function onStop() {
         <span class="stat-label">跟单倍数</span>
         <span class="stat-value">{{ followStatus.follow_multiplier }}</span>
       </div>
+      <div class="stat-item">
+        <span class="stat-label">今日记录</span>
+        <span class="stat-value">{{ todayRecordsCount }} 条</span>
+      </div>
     </div>
 
     <div v-if="!isRunning" class="start-options">
@@ -172,6 +203,19 @@ async function onStop() {
       </ElCheckbox>
       <div class="field-warning">
         默认关闭。开启后可能跟入喊单端已存在的存量委托。
+      </div>
+      <div v-if="showColdStartWarning" class="cold-start-warning">
+        <div class="warning-text">
+          当前有 {{ todayRecordsCount }} 条今日跟单记录，可能导致防重复机制误判而跳过存量委托。
+        </div>
+        <ElButton
+          type="warning"
+          size="small"
+          :loading="clearLoading"
+          @click="onClearTodayRecords"
+        >
+          清空今日记录
+        </ElButton>
       </div>
     </div>
 
@@ -293,6 +337,24 @@ async function onStop() {
   margin-top: 6px;
   font-size: 12px;
   color: #e6a23c;
+}
+
+.cold-start-warning {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  border-radius: 6px;
+}
+
+.cold-start-warning .warning-text {
+  font-size: 12px;
+  color: #e6a23c;
+  line-height: 1.5;
 }
 
 .error-msg {

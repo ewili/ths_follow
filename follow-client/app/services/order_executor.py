@@ -24,6 +24,13 @@ logger = logging.getLogger(__name__)
 
 _MIN_LOT = 100
 
+# THS 当日委托字段名
+_KEY_ENTRUST_NO = "合同编号"
+_KEY_STOCK_CODE = "证券代码"
+_KEY_DIRECTION = "操作"
+_KEY_PRICE = "委托价格"
+_KEY_QTY = "委托数量"
+
 
 def _calc_buy_qty_multiplier(
     multiplier: float,
@@ -133,6 +140,38 @@ def _calc_sell_qty_by_position_ratio(
     return min(raw, available)
 
 
+async def _recover_entrust_no(stock_code: str, direction: str, price: float, qty: int) -> str:
+    """easytrader 下单返回 entrust_no 为空时，从当日委托中恢复合同编号。
+
+    匹配条件：证券代码 + 买卖方向 + 委托价格 + 委托数量 完全一致。
+    """
+    try:
+        trader = LocalTraderService.get()
+        entrusts = await trader.get_today_entrusts()
+        for e in entrusts:
+            code = str(e.get(_KEY_STOCK_CODE, "")).strip()
+            raw_dir = str(e.get(_KEY_DIRECTION, ""))
+            no = str(e.get(_KEY_ENTRUST_NO, ""))
+            e_price = float(e.get(_KEY_PRICE, 0) or 0)
+            e_qty = int(float(e.get(_KEY_QTY, 0) or 0))
+            is_sell = "卖" in raw_dir
+            dir_match = (direction == "买入" and not is_sell) or (direction == "卖出" and is_sell)
+            if code == stock_code and dir_match and abs(e_price - price) < 0.001 and e_qty == qty and no:
+                return no
+    except Exception as exc:
+        logger.warning("recover_entrust_no_failed stock=%s detail=%s", stock_code, exc)
+    return ""
+
+
+def _log_entrust_no_result(action_name: str, stock_code: str, price: float, qty: int, entrust_no: str, recovered: bool = False, extra: str = "") -> None:
+    """根据 entrust_no 是否为空选择日志级别：空→WARNING（撤单跟随和双重保险将失效），非空→INFO。"""
+    if entrust_no:
+        suffix = " (recovered)" if recovered else ""
+        logger.info("%s_ok stock=%s price=%.4f qty=%d entrust_no=%s%s%s", action_name, stock_code, price, qty, entrust_no, suffix, extra)
+    else:
+        logger.warning("%s_ok_no_entrust_no stock=%s price=%.4f qty=%d (合同编号获取失败，撤单跟随和双重保险将失效)%s", action_name, stock_code, price, qty, extra)
+
+
 async def execute_buy(
     action: FollowAction,
     total_assets: float,
@@ -166,16 +205,21 @@ async def execute_buy(
         # 【后执行】执行下单
         result = await trader.buy(stock_code, price, qty)
         entrust_no = result.get("entrust_no", "")
-        
+
+        # 合同编号为空时尝试从当日委托恢复
+        recovered = False
+        if not entrust_no:
+            logger.warning("buy_empty_entrust_no stock=%s price=%.4f qty=%d, attempting recovery", stock_code, price, qty)
+            entrust_no = await _recover_entrust_no(stock_code, "买入", price, qty)
+            if entrust_no:
+                recovered = True
+
         # 【更新】成功后更新为 success
         repository.update_follow_record(
             action.signal_entrust_no, "buy",
             status="success", entrust_no=entrust_no,
         )
-        logger.info(
-            "buy_ok stock=%s price=%.4f qty=%d entrust_no=%s",
-            stock_code, price, qty, entrust_no,
-        )
+        _log_entrust_no_result("buy", stock_code, price, qty, entrust_no, recovered=recovered)
     except Exception as exc:
         error_detail = str(exc)
         error_code = "trade_error"
@@ -194,11 +238,20 @@ async def execute_buy(
             try:
                 result = await trader.buy(stock_code, price, qty)
                 entrust_no = result.get("entrust_no", "")
+
+                # 合同编号为空时尝试从当日委托恢复
+                recovered = False
+                if not entrust_no:
+                    logger.warning("buy_retry_empty_entrust_no stock=%s, attempting recovery", stock_code)
+                    entrust_no = await _recover_entrust_no(stock_code, "买入", price, qty)
+                    if entrust_no:
+                        recovered = True
+
                 repository.update_follow_record(
                     action.signal_entrust_no, "buy",
                     status="success", entrust_no=entrust_no,
                 )
-                logger.info("buy_retry_ok stock=%s price=%.4f qty=%d entrust_no=%s", stock_code, price, qty, entrust_no)
+                _log_entrust_no_result("buy_retry", stock_code, price, qty, entrust_no, recovered=recovered)
                 return
             except Exception as retry_exc:
                 error_detail = str(retry_exc)
@@ -255,22 +308,27 @@ async def execute_sell(
         # 【后执行】执行下单
         result = await trader.sell(stock_code, price, qty)
         entrust_no = result.get("entrust_no", "")
-        
+
+        # 合同编号为空时尝试从当日委托恢复
+        recovered = False
+        if not entrust_no:
+            logger.warning("sell_empty_entrust_no stock=%s price=%.4f qty=%d, attempting recovery", stock_code, price, qty)
+            entrust_no = await _recover_entrust_no(stock_code, "卖出", price, qty)
+            if entrust_no:
+                recovered = True
+
         detail_msg = None
         if used_fallback_price:
             detail_msg = f"涨跌停价缺失，使用喊单原价 {price:.4f} 作为卖出价"
-        
+
         # 【更新】成功后更新为 success
         repository.update_follow_record(
             action.signal_entrust_no, "sell",
             status="success", entrust_no=entrust_no,
             detail=detail_msg,
         )
-        logger.info(
-            "sell_ok stock=%s price=%.4f qty=%d entrust_no=%s%s",
-            stock_code, price, qty, entrust_no,
-            " (fallback_price)" if used_fallback_price else "",
-        )
+        extra = " (fallback_price)" if used_fallback_price else ""
+        _log_entrust_no_result("sell", stock_code, price, qty, entrust_no, recovered=recovered, extra=extra)
     except Exception as exc:
         error_detail = str(exc)
         
@@ -282,6 +340,15 @@ async def execute_sell(
             try:
                 result = await trader.sell(stock_code, price, qty)
                 entrust_no = result.get("entrust_no", "")
+
+                # 合同编号为空时尝试从当日委托恢复
+                recovered = False
+                if not entrust_no:
+                    logger.warning("sell_retry_empty_entrust_no stock=%s, attempting recovery", stock_code)
+                    entrust_no = await _recover_entrust_no(stock_code, "卖出", price, qty)
+                    if entrust_no:
+                        recovered = True
+
                 detail_msg = None
                 if used_fallback_price:
                     detail_msg = f"涨跌停价缺失，使用喊单原价 {price:.4f} 作为卖出价"
@@ -290,7 +357,7 @@ async def execute_sell(
                     status="success", entrust_no=entrust_no,
                     detail=detail_msg,
                 )
-                logger.info("sell_retry_ok stock=%s price=%.4f qty=%d entrust_no=%s", stock_code, price, qty, entrust_no)
+                _log_entrust_no_result("sell_retry", stock_code, price, qty, entrust_no, recovered=recovered)
                 return
             except Exception as retry_exc:
                 error_detail = str(retry_exc)

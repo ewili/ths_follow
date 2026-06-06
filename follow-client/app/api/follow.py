@@ -46,6 +46,18 @@ async def get_follow_status() -> FollowStatusResponse:
     return FollowEngine.get().get_status()
 
 
+@router.delete("/records/today")
+async def clear_today_records() -> dict:
+    """清空当日所有跟单记录。
+
+    用于冷启动存量对齐前清除旧记录，避免 has_followed() 防重复误判。
+    引擎运行中也可调用（不影响引擎运行，仅清理历史记录）。
+    """
+    deleted = repository.delete_today_records()
+    logger.info("clear_today_records deleted=%d", deleted)
+    return {"deleted": deleted}
+
+
 @router.get("/records", response_model=FollowRecordsResponse)
 async def get_follow_records(
     page: int = Query(1, ge=1),

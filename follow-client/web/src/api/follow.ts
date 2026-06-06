@@ -21,3 +21,9 @@ export function stopFollow() {
     requestJson<FollowStatusResponse>(r),
   )
 }
+
+export function clearTodayRecords() {
+  return fetch(`${BASE}/records/today`, { method: 'DELETE' }).then((r) =>
+    requestJson<{ deleted: number }>(r),
+  )
+}

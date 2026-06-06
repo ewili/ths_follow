@@ -60,6 +60,7 @@ class FollowStatusResponse(BaseModel):
     start_time: Optional[datetime] = None
     follow_mode: Literal["ratio", "multiplier"] = "ratio"
     follow_multiplier: float = 1.0
+    today_records_count: int = 0
 
 
 # ── 跟单记录 Response ────────────────────────────────────────

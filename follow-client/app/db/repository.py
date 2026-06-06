@@ -394,6 +394,38 @@ def has_followed(signal_entrust_no: str, action: str) -> bool:
         conn.close()
 
 
+def get_today_records_count() -> int:
+    """返回当日跟单记录数量。"""
+    today = date.today().isoformat()
+    conn = _get_conn()
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM follow_records WHERE created_at >= ?",
+            (today,),
+        ).fetchone()
+        return row[0]
+    finally:
+        conn.close()
+
+
+def delete_today_records() -> int:
+    """清空当日所有跟单记录，返回删除行数。
+
+    用于冷启动存量对齐前清除旧记录，避免 has_followed() 防重复误判。
+    """
+    today = date.today().isoformat()
+    conn = _get_conn()
+    try:
+        cursor = conn.execute(
+            "DELETE FROM follow_records WHERE created_at >= ?",
+            (today,),
+        )
+        conn.commit()
+        return cursor.rowcount
+    finally:
+        conn.close()
+
+
 def get_records_page(
     page: int = 1,
     size: int = 50,
@@ -435,6 +467,7 @@ def get_today_successful_entrust_nos() -> dict[str, str]:
               AND action IN ('buy', 'sell')
               AND status = 'success'
               AND entrust_no IS NOT NULL
+              AND entrust_no != ''
             """,
             (today,),
         ).fetchall()
@@ -461,6 +494,7 @@ def get_local_entrust_nos_by_signal(signal_entrust_no: str) -> list[str]:
               AND action IN ('buy', 'sell')
               AND status = 'success'
               AND entrust_no IS NOT NULL
+              AND entrust_no != ''
             ORDER BY created_at ASC
             """,
             (signal_entrust_no,),

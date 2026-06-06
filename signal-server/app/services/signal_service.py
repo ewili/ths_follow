@@ -54,6 +54,9 @@ logger = logging.getLogger(__name__)
 #: 缓存 TTL（秒）；每次 GUI 操作必然触发验证码（2-10s），过短 TTL 会导致频繁验证码恶性循环
 TTL_SECONDS: float = 10.0
 
+#: 空结果（GUI 拉取为空）的短 TTL（秒）；避免空列表长期占据缓存导致跟单端持续拿到空
+_EMPTY_TTL_SECONDS: float = 2.0
+
 CacheKey = Literal["balance", "position", "entrusts"]
 
 
@@ -201,11 +204,18 @@ class SignalService:
             now_dt = datetime.now()
             expires_at = time.monotonic() + TTL_SECONDS
             if include_entrusts and entrusts is not None:
+                # 委托为空列表时使用短 TTL，避免 GUI 切页失败后空结果长期占据缓存
+                ent_ttl = _EMPTY_TTL_SECONDS if entrusts == [] else TTL_SECONDS
                 self._cache["entrusts"] = _CacheEntry(
                     value=entrusts,
                     fetched_at=now_dt,
-                    expires_at=expires_at,
+                    expires_at=time.monotonic() + ent_ttl,
                 )
+                if entrusts == []:
+                    logger.warning(
+                        "entrusts_cache_empty_short_ttl ttl=%.1fs (GUI可能切页失败)",
+                        _EMPTY_TTL_SECONDS,
+                    )
             if include_funds and balance is not None:
                 self._cache["balance"] = _CacheEntry(
                     value=balance,
@@ -286,11 +296,19 @@ class SignalService:
         try:
             RuntimeMetricsService.get().record_cache_miss(key)
             value = await fetch_fn()
+            # 委托/持仓为空列表时使用短 TTL，避免 GUI 切页失败后空结果长期占据缓存
+            is_empty_list = isinstance(value, list) and len(value) == 0
+            ttl = _EMPTY_TTL_SECONDS if is_empty_list else TTL_SECONDS
             self._cache[key] = _CacheEntry(
                 value=value,
                 fetched_at=datetime.now(),
-                expires_at=time.monotonic() + TTL_SECONDS,
+                expires_at=time.monotonic() + ttl,
             )
+            if is_empty_list:
+                logger.warning(
+                    "cache_empty_short_ttl key=%s ttl=%.1fs (GUI可能切页失败)",
+                    key, _EMPTY_TTL_SECONDS,
+                )
             if not fut.done():
                 fut.set_result(value)
             elapsed = (time.perf_counter() - t0) * 1000
@@ -390,11 +408,13 @@ class SignalService:
             raw_entrusts = await self._get_or_fetch("entrusts", self._fetch_entrusts)
             raw_entrusts = raw_entrusts or []
 
-            codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
-            limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
-
-            # 诊断日志
-            if raw_entrusts:
+            # 诊断日志：区分 GUI 拉到空 vs 过滤后为空
+            if not raw_entrusts:
+                logger.warning("entrusts_raw_empty mode=multiplier reason=GUI拉取为空(切页失败或验证码阻塞)")
+                limit_map, trade_date = {}, None
+            else:
+                codes = sorted({str(e.get(_ENT_KEY_STOCK_CODE, "")).strip() for e in raw_entrusts})
+                limit_map, trade_date = stock_repository.get_limit_prices_by_codes(codes)
                 matched_codes = [c for c in codes if c in limit_map]
                 logger.info(
                     "entrusts_diagnosis mode=multiplier raw_count=%d codes=%d limit_matched=%d trade_date=%s",
@@ -404,6 +424,11 @@ class SignalService:
             valid_items = _assemble_valid_entrust_dtos(
                 raw_entrusts, limit_map, total_assets=0.0, pos_qty_map={}, signal_mode=signal_mode
             )
+            if raw_entrusts and not valid_items:
+                logger.warning(
+                    "entrusts_filtered_all mode=multiplier raw_count=%d valid_count=0 (涨跌停价缺失或方向/属性过滤)",
+                    len(raw_entrusts),
+                )
             return valid_items, trade_date
 
         # 资金比例模式：原有逻辑不变
@@ -413,6 +438,10 @@ class SignalService:
         raw_positions = await self._get_or_fetch("position", self._fetch_position)
         raw_entrusts = raw_entrusts or []
         raw_positions = raw_positions or []
+
+        # 诊断日志：区分 GUI 拉到空 vs 过滤后为空
+        if not raw_entrusts:
+            logger.warning("entrusts_raw_empty mode=ratio reason=GUI拉取为空(切页失败或验证码阻塞)")
 
         total_assets = _to_float(raw_balance.get(_BAL_KEY_TOTAL_ASSETS), 0.0)
         pos_qty_map: dict[str, int] = {
@@ -440,6 +469,11 @@ class SignalService:
         valid_items = _assemble_valid_entrust_dtos(
             raw_entrusts, limit_map, total_assets, pos_qty_map, signal_mode=signal_mode
         )
+        if raw_entrusts and not valid_items:
+            logger.warning(
+                "entrusts_filtered_all mode=ratio raw_count=%d valid_count=0 (涨跌停价缺失或方向/属性过滤)",
+                len(raw_entrusts),
+            )
         return valid_items, trade_date
 
     async def get_history_entrusts_as_dto(
