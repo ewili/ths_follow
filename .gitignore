@@ -39,6 +39,7 @@ api_test_results.json
 *.swp
 .DS_Store
 Thumbs.db
+**/tmp_*.png
 tmp.png
 
 # ===== 验证码调试产物 =====

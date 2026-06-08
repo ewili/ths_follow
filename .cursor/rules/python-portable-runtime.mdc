@@ -49,3 +49,10 @@ alwaysApply: true
 - **正确做法**：`EM_SETSEL(0, -1)` 全选 + `WM_CHAR` 逐字符覆盖（第一个字符自动替换选中内容）。
 - `WM_CLEAR` 也不可靠（部分时序下选中文本未生效）。
 - `GetWindowText` 无法读取 THS 自定义 Edit 控件文本，`actual=` 为空不代表输入失败。
+
+### 验证码处理入口约束
+
+- **验证码自动处理仅允许两个入口**：`easytrader_copy_patch.py` 中的 `_copy_get_clipboard_data_patched`（Copy 策略层）和 `_patch_close_pop_dialog`（close_pop_dialog 补丁）。
+- **禁止在 `trader_service.py` / `local_trader_service.py` 中内联验证码处理逻辑**——这些服务持有 `asyncio.Lock`，验证码处理可能耗时数分钟（VLM 调用 × 多轮重试），内联会导致全局锁被长时间持有，所有业务请求排队阻塞。
+- **`_bring_to_foreground()` 不得触发验证码识别/输入**——它是辅助函数，被多个操作调用，若内部陷入验证码死循环会连锁阻塞全部 GUI 操作。
+- **`health_probe` 不触发 `_bring_to_foreground`**——健康检查仅需验证 `_main.exists()`（窗口句柄是否有效），无需窗口置前，更无需处理验证码弹窗。

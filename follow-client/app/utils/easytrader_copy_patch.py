@@ -21,6 +21,20 @@ from PIL import Image
 _CAPTCHA_IMG_PATH = "tmp.png"
 
 
+def _captcha_screenshot_path() -> str:
+    """生成带时间戳+随机后缀的截图路径，避免读到缓存的旧截图文件。
+
+    每次截图都写入唯一文件名，确保 VLM 不会因文件缓存
+    而对同一文件路径返回重复结果。
+    """
+    import os
+    import random
+    base, ext = os.path.splitext(_CAPTCHA_IMG_PATH)
+    ts = _time_module.strftime("%H%M%S", _time_module.localtime())
+    rnd = random.randint(100, 999)
+    return f"{base}_{ts}_{rnd}{ext}"
+
+
 def _type_captcha_via_wm_char(editor, text):
     """通过 WM_CHAR 消息逐字符输入验证码，不依赖窗口焦点/前台状态。
 
@@ -603,6 +617,63 @@ def _captcha_recognize_vlm(img_path: str, api_key: str, call_count: int = 3) -> 
 
 _captcha_local_fail_count = 0  # auto 模式下 ddddocr 连续失败计数（仅内存，重启清零）
 
+# ── 验证码识别去重状态（跨入口共享） ──────────────────────────────────
+_captcha_last_result = ""       # 上一次 VLM/本地识别的原始结果
+_captcha_repeat_count = 0      # 连续相同结果的次数
+_CAPTCHA_REPEAT_THRESHOLD = 3  # 连续相同 N 次触发强制延时
+_captcha_handled_set: set = set()  # 当前验证码弹窗已处理过的结果集合（避免跨入口重复）
+
+
+def _captcha_check_repeat(result: str) -> bool:
+    """检测识别结果是否连续重复，返回 True 表示触发了强制延时。
+
+    VLM 幻觉锁死时会对不同截图返回相同结果（如一直返回 C5R7），
+    此函数跟踪连续相同结果计数，超过阈值时强制延时并重置状态。
+    """
+    global _captcha_last_result, _captcha_repeat_count
+    if result and result == _captcha_last_result:
+        _captcha_repeat_count += 1
+    else:
+        _captcha_last_result = result
+        _captcha_repeat_count = 1
+
+    if _captcha_repeat_count >= _CAPTCHA_REPEAT_THRESHOLD:
+        extra_wait = min(_captcha_repeat_count - _CAPTCHA_REPEAT_THRESHOLD + 1, 3) * 2.0
+        _log(
+            logging.WARNING,
+            "captcha result repeat detected: result=%s repeat_count=%d, "
+            "forcing extra_wait=%.1fs to break VLM hallucination loop",
+            result, _captcha_repeat_count, extra_wait,
+        )
+        _time_module.sleep(extra_wait)
+        # 重置以避免无限累加等待
+        _captcha_repeat_count = 0
+        _captcha_last_result = ""
+        return True
+    return False
+
+
+def _captcha_mark_handled(result: str) -> bool:
+    """标记某个识别结果已被当前验证码弹窗处理过。
+
+    返回 True 表示该结果已被处理过（应跳过），False 表示首次处理。
+    用于防止 _handle_captcha_dialog 和 _handle_captcha_in_close_pop
+    对同一验证码重复输入相同结果。
+    """
+    key = result.upper()
+    if key in _captcha_handled_set:
+        return True
+    _captcha_handled_set.add(key)
+    return False
+
+
+def _captcha_reset_handled() -> None:
+    """重置验证码处理去重状态（弹窗消失后调用）。"""
+    global _captcha_last_result, _captcha_repeat_count
+    _captcha_handled_set.clear()
+    _captcha_last_result = ""
+    _captcha_repeat_count = 0
+
 
 def _captcha_recognize(img_path: str, mode: str = "local", vlm_api_key: str = "",
                         auto_fail_threshold: int = 3, vlm_call_count: int = 3) -> tuple[str, list[str]]:
@@ -814,6 +885,7 @@ def _process_captcha_dialog(
                 found = True
                 Copy._need_captcha_reg = False
                 mark_captcha_cooldown()
+                _captcha_reset_handled()  # 弹窗消失，重置去重状态
                 break
 
         dlg = trader.app.window(handle=dlg_wrapper.handle)
@@ -849,14 +921,16 @@ def _process_captcha_dialog(
             _log(logging.ERROR, "%scaptcha image control not found (attempt %d)", prefix, attempt)
             continue
 
+        # 使用带时间戳+随机后缀的截图路径，避免 VLM 缓存旧文件
+        _ss_path = _captcha_screenshot_path()
         try:
-            img_ctrl.capture_as_image().save(_CAPTCHA_IMG_PATH)
+            img_ctrl.capture_as_image().save(_ss_path)
         except Exception as e:
             _log(logging.ERROR, "%scaptcha capture failed (attempt %d): %s", prefix, attempt, e)
             continue
 
         captcha_num, variants = _captcha_recognize(
-            _CAPTCHA_IMG_PATH,
+            _ss_path,
             mode=captcha_mode,
             vlm_api_key=vlm_api_key,
             auto_fail_threshold=auto_fail_threshold,
@@ -872,6 +946,10 @@ def _process_captcha_dialog(
             attempt,
         )
 
+        # VLM 结果去重检测：连续相同结果强制延时
+        if captcha_num:
+            _captcha_check_repeat(captcha_num)
+
         if len(captcha_num) != 4:
             try:
                 dlg.child_window(control_id=0x965, class_name="Static").click()
@@ -882,6 +960,16 @@ def _process_captcha_dialog(
 
         # 逐变体尝试：先尝试所有变体（大小写等），全部失败再刷新图片
         for vi, captcha_try in enumerate(variants):
+            # 跨入口去重：该结果已在其他入口尝试过则跳过
+            if _captcha_mark_handled(captcha_try):
+                _log(
+                    logging.INFO,
+                    "%scaptcha skip already-handled variant %s (attempt %d)",
+                    prefix,
+                    captcha_try,
+                    attempt + 1,
+                )
+                continue
             _log(
                 logging.INFO,
                 "%scaptcha trying variant %d/%d (attempt %d): %s",
@@ -952,6 +1040,7 @@ def _process_captcha_dialog(
                 found = True
                 Copy._need_captcha_reg = False
                 mark_captcha_cooldown()
+                _captcha_reset_handled()  # 成功后重置去重状态
                 break
 
             _log(
@@ -994,6 +1083,8 @@ def _process_captcha_dialog(
             prefix,
             attempt + 1,
         )
+    else:
+        _captcha_reset_handled()  # 确保成功时也重置
     return found
 
 
@@ -1355,6 +1446,7 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
             dlg_wrapper = _find_captcha_dialog(trader, timeout=1.0)
             if dlg_wrapper is None:
                 _log(logging.INFO, "close_pop_dialog captcha: dialog gone after attempt %d", attempt)
+                _captcha_reset_handled()  # 弹窗消失，重置去重状态
                 return
         dlg = trader.app.window(handle=dlg_wrapper.handle)
         try:
@@ -1380,23 +1472,39 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
         if img_ctrl is None:
             _log(logging.ERROR, "close_pop_dialog captcha: image control not found (attempt %d)", attempt)
             continue
+        # 使用带时间戳+随机后缀的截图路径，避免 VLM 缓存旧文件
+        _ss_path = _captcha_screenshot_path()
         try:
-            img_ctrl.capture_as_image().save(_CAPTCHA_IMG_PATH)
+            img_ctrl.capture_as_image().save(_ss_path)
         except Exception as e:
             _log(logging.ERROR, "close_pop_dialog captcha: capture failed (attempt %d): %s", attempt, e)
             continue
         captcha_num, variants = _captcha_recognize(
-            _CAPTCHA_IMG_PATH,
+            _ss_path,
             mode=_captcha_mode,
             vlm_api_key=_vlm_api_key,
             auto_fail_threshold=_captcha_auto_fail_threshold,
             vlm_call_count=_captcha_vlm_call_count,
         )
         _log(logging.INFO, "close_pop_dialog captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
+        # VLM 结果去重检测：连续相同结果强制延时
+        if captcha_num:
+            _captcha_check_repeat(captcha_num)
         if len(captcha_num) != 4:
             try:
                 dlg.child_window(control_id=0x965, class_name="Static").click()
                 trader.wait(0.2)
+            except Exception:
+                pass
+            continue
+        # 跨入口去重：该结果已在其他入口尝试过则跳过
+        if _captcha_mark_handled(captcha_num):
+            _log(logging.INFO, "close_pop_dialog captcha skip already-handled result %s (attempt %d)", captcha_num, attempt + 1)
+            # 即使跳过已处理结果，仍需点击图片刷新以获取新验证码
+            try:
+                if img_ctrl is not None:
+                    img_ctrl.click()
+                    trader.wait(0.5)
             except Exception:
                 pass
             continue
@@ -1446,6 +1554,7 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
         if _find_captcha_dialog(trader, timeout=0.5) is None:
             _log(logging.INFO, "close_pop_dialog 验证码验证成功-->%s (attempt %d)", captcha_try, attempt+1)
             mark_captcha_cooldown()
+            _captcha_reset_handled()  # 成功后重置去重状态
             return
         else:
             _log(logging.WARNING, "close_pop_dialog captcha still present after input %s (attempt %d)", captcha_try, attempt+1)
@@ -1462,6 +1571,7 @@ def _handle_captcha_in_close_pop(trader, dlg_wrapper) -> None:
         except Exception:
             pass
     _log(logging.ERROR, "close_pop_dialog captcha: 8 次识别均失败，请手动处理验证码弹窗")
+    _captcha_reset_handled()  # 失败后也重置去重状态，允许下次重新尝试
 
 
 def _patch_close_pop_dialog():

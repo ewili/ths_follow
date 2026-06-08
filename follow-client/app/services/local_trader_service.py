@@ -93,35 +93,13 @@ class LocalTraderService:
         """尝试将同花顺主窗口置前，减少 SetForegroundWindow / SendInput 失败概率。
 
         在锁内调用，线程安全。失败时仅写日志，不阻断后续操作。
-        若检测到验证码弹窗，先处理验证码再置前主窗口。
         使用 AttachThreadInput + 重试机制增强可靠性。
+
+        注意：不再在此处自动处理验证码弹窗。验证码由 easytrader_copy_patch
+        在 Copy 策略层透明处理，避免健康检查等场景陷入验证码死循环阻塞全局锁。
         """
         if self._trader is None:
             return
-        # 验证码弹窗预处理：模态弹窗会阻塞 SetForegroundWindow
-        captcha_handled = False
-        try:
-            from app.utils.easytrader_copy_patch import (
-                _quick_check_captcha,
-                should_skip_foreground_captcha,
-            )
-            if should_skip_foreground_captcha(self._trader):
-                captcha_dlg = None
-            else:
-                captcha_dlg = _quick_check_captcha(self._trader)
-                if captcha_dlg is None:
-                    from app.utils.easytrader_copy_patch import _find_captcha_dialog
-                    captcha_dlg = _find_captcha_dialog(self._trader, timeout=0.5)
-            if captcha_dlg is not None:
-                logger.info("bring_to_foreground: captcha dialog detected, handling first")
-                self._handle_captcha_dialog(captcha_dlg)
-                captcha_handled = True
-        except Exception:
-            logger.debug("bring_to_foreground_captcha_check_failed", exc_info=True)
-
-        # 验证码处理成功后，等待窗口焦点恢复
-        if captcha_handled:
-            time.sleep(0.3)
 
         # 尝试将主窗口置前（带重试 + AttachThreadInput 辅助）
         for attempt in range(3):
@@ -173,177 +151,12 @@ class LocalTraderService:
                 time.sleep(0.1)
         logger.info("bring_to_foreground_failed_after_retries")
 
-    def _handle_captcha_dialog(self, dlg_wrapper) -> None:
-        """处理验证码弹窗：截图识别 → 输入 → 点击确定。
-
-        在锁内调用，线程安全。失败仅写日志，不抛异常。
-        每轮重新截图识别（THS 输入错误后可能自动刷新图片），
-        最多 8 轮，每轮只输入 1 个最佳结果。
-        """
-        from easytrader.grid_strategies import Copy
-        from app.utils.easytrader_copy_patch import (
-            _find_captcha_dialog,
-            _captcha_recognize,
-            _CAPTCHA_IMG_PATH,
-            _log,
-            mark_captcha_cooldown,
-        )
-        from app.db import repository
-        _cfg = repository.load_config()
-        _captcha_mode = _cfg.captcha_mode
-        _vlm_api_key = _cfg.vlm_api_key
-        _captcha_auto_fail_threshold = _cfg.captcha_auto_fail_threshold
-        _captcha_vlm_call_count = _cfg.captcha_vlm_call_count
-        trader = self._trader
-        if trader is None:
-            return
-        # 每轮截图识别后，在同一轮内循环试所有大小写变体
-        # 全部失败后刷新图片，再进入下一轮
-        for attempt in range(8):
-            if attempt > 0:
-                dlg_wrapper = _find_captcha_dialog(trader, timeout=1.0)
-                if dlg_wrapper is None:
-                    _log(logging.INFO, "captcha dialog gone after attempt %d", attempt)
-                    Copy._need_captcha_reg = False
-                    mark_captcha_cooldown()
-                    return
-            dlg = trader.app.window(handle=dlg_wrapper.handle)
-            try:
-                dlg.set_focus()
-            except Exception:
-                pass
-            # 截图识别
-            img_ctrl = None
-            try:
-                img_ctrl = dlg.child_window(control_id=0x965, class_name="Static")
-                if not img_ctrl.exists():
-                    img_ctrl = None
-            except Exception:
-                img_ctrl = None
-            if img_ctrl is None:
-                for child in dlg.children(class_name="Static"):
-                    try:
-                        if child.is_visible():
-                            img_ctrl = child
-                            break
-                    except Exception:
-                        continue
-            if img_ctrl is None:
-                _log(logging.ERROR, "captcha image control not found (attempt %d)", attempt)
-                continue
-            try:
-                img_ctrl.capture_as_image().save(_CAPTCHA_IMG_PATH)
-            except Exception as e:
-                _log(logging.ERROR, "captcha capture failed (attempt %d): %s", attempt, e)
-                continue
-            captcha_num, variants = _captcha_recognize(
-                _CAPTCHA_IMG_PATH,
-                mode=_captcha_mode,
-                vlm_api_key=_vlm_api_key,
-                auto_fail_threshold=_captcha_auto_fail_threshold,
-                vlm_call_count=_captcha_vlm_call_count,
-            )
-            
-            _log(logging.INFO, "captcha result-->%s variants=%s (attempt %d)", captcha_num, variants, attempt)
-            if len(captcha_num) != 4:
-                try:
-                    dlg.child_window(control_id=0x965, class_name="Static").click()
-                    trader.wait(0.2)
-                except Exception:
-                    pass
-                continue
-
-            # 每轮只试1个变体（避免频繁错误输入导致THS断连）
-            # 由于每轮刷新后都是全新的验证码，应始终尝试当前图片概率最高、最准确的第一个变体 (Variant 1)
-            captcha_try = variants[0]
-            _log(logging.INFO, "captcha trying best variant (attempt %d): %s", attempt+1, captcha_try)
-
-            # 输入验证码
-            editor = None
-            try:
-                editor = dlg.child_window(control_id=0x964, class_name="Edit")
-                if not editor.exists():
-                    editor = None
-            except Exception:
-                editor = None
-            if editor is None:
-                for child in dlg.children(class_name="Edit"):
-                    try:
-                        if child.is_visible():
-                            editor = child
-                            break
-                    except Exception:
-                        continue
-            if editor is None:
-                _log(logging.ERROR, "captcha edit control not found (attempt %d)", attempt)
-                break
-            try:
-                editor.set_focus()
-            except Exception:
-                pass
-            trader.wait(0.1)
-            try:
-                # 通过 WM_CHAR 逐字符输入，触发 EN_CHANGE 通知
-                # set_edit_text (WM_SETTEXT) 不触发通知，THS 不识别；
-                # type_keys 依赖 SetForegroundWindow，模态弹窗下失败
-                # 清空策略：EM_SETSEL 全选 + WM_CHAR 逐字符覆盖（第一个字符替换选中内容）
-                # 注意：WM_SETTEXT("") 会破坏 THS Edit 控件内部状态，不可使用
-                try:
-                    hwnd = editor.element_info.handle
-                except Exception:
-                    hwnd = None
-                if hwnd is not None:
-                    import win32con
-                    import win32gui
-                    win32gui.SendMessage(hwnd, win32con.EM_SETSEL, 0, -1)
-                    for ch in captcha_try:
-                        win32gui.SendMessage(hwnd, win32con.WM_CHAR, ord(ch), 0)
-                else:
-                    editor.set_edit_text(captcha_try)
-            except Exception as e:
-                _log(logging.ERROR, "captcha type failed (attempt %d): %s", attempt, e)
-                continue
-            trader.wait(0.1)
-            # 点击确定
-            try:
-                dlg.child_window(title="确定").click()
-            except Exception:
-                try:
-                    dlg.type_keys("{ENTER}", set_foreground=False, pause=0.1)
-                except Exception:
-                    pass
-            trader.wait(0.5)
-            # 验证：对话框消失即成功
-            if _find_captcha_dialog(trader, timeout=0.5) is None:
-                _log(logging.INFO, "验证码验证成功-->%s (variant %d/%d)", captcha_try, attempt+1, len(variants))
-                Copy._need_captcha_reg = False
-                mark_captcha_cooldown()
-                return
-            else:
-                _log(logging.WARNING, "captcha still present after input %s (variant %d/%d)", captcha_try, attempt+1, len(variants))
-
-            # 本轮变体失败，点击图片刷新验证码
-            _log(logging.INFO, "captcha variant %s failed for %s, clicking image to refresh", captcha_try, captcha_num.upper())
-            # 递增等待：1s, 1.5s, 2s, 2.5s... 避免THS判定恶意操作
-            wait_time = 1.0 + attempt * 0.5
-            trader.wait(wait_time)
-            try:
-                if img_ctrl is not None:
-                    img_ctrl.click()
-                    trader.wait(0.5)
-                else:
-                    dlg.child_window(control_id=0x965, class_name="Static").click()
-                    trader.wait(0.5)
-            except Exception:
-                pass
-        # 8 次均失败，不点取消（避免破坏窗口状态），保持弹窗让用户手动处理
-        _log(logging.ERROR, "captcha 8 次识别均失败，请手动处理验证码弹窗")
-
     async def _run_blocking(self, fn: Callable[[], T], op_name: str) -> T:
         loop = asyncio.get_running_loop()
         t0 = time.perf_counter()
         async with self._lock:
             # 下单类操作需要窗口在前台
+            # health_probe 不需要置前：仅检查窗口句柄是否存在，无需 GUI 交互
             if op_name in (
                 "buy", "sell", "cancel_entrust", "position", "today_entrusts",
                 "balance", "follow_snapshot", "history_entrusts",
