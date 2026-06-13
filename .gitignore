@@ -52,3 +52,6 @@ tmp.png
 
 # ===== Vite 本地配置 =====
 *.local
+fetch_install.ps1
+install_qoder.ps1
+qoder_install_raw.ps1
